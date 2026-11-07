@@ -1,0 +1,29 @@
+# Runtime state / 运行时产物（由程序自动生成，含本机信息）
+state.json
+heartbeat.json
+github_hosts_keeper.log
+github_hosts_keeper.log.*
+backups/
+*.bak
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Local workspace & unrelated demo / 本机工作数据与无关演示
+.workbuddy/
+file-upload-demo/
+
+# Superseded legacy script / 已被取代的旧版脚本
+update-github-hosts.bat
+
+# Local config override / 本地覆盖配置
+config.local.json
+
+# Editors & OS / 编辑器与系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

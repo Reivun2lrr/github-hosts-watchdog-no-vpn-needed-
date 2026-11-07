@@ -1,0 +1,66 @@
+{
+  "_comment": "GitHub Hosts Watchdog 默认配置模板 / Default configuration template. Hot-reloaded every cycle; copy to config.json to use. Full reference: docs/CONFIGURATION.md. Web pages are never opened automatically; use --open or open-github.bat manually.",
+
+  "interval_min_minutes": 45,
+  "interval_max_minutes": 120,
+  "failure_retry_minutes": 10,
+  "jitter_ratio": 0.2,
+
+  "dns_timeout_seconds": 6,
+  "connect_timeout_seconds": 4,
+  "http_timeout_seconds": 8,
+  "edge_verify_timeout_seconds": 45,
+  "flushdns_timeout_seconds": 15,
+  "max_retries": 3,
+  "retry_backoff_seconds": 2,
+  "max_candidates_per_domain": 14,
+  "probe_workers": 12,
+
+  "domains": [
+    "github.com",
+    "api.github.com",
+    "codeload.github.com",
+    "raw.githubusercontent.com",
+    "gist.githubusercontent.com",
+    "gist.github.com",
+    "github.global.ssl.fastly.net"
+  ],
+  "doh_endpoints": [
+    "https://dns.alidns.com/resolve?name={domain}&type=A",
+    "https://cloudflare-dns.com/dns-query?name={domain}&type=A",
+    "https://doh.pub/dns-query?name={domain}&type=A"
+  ],
+
+  "min_valid_records": 2,
+  "verify_url": "https://github.com",
+  "open_edge": false,
+  "headless_verify": false,
+  "edge_path": "",
+
+  "backup_keep": 10,
+  "log_max_bytes": 1048576,
+  "log_backup_count": 3,
+  "log_path": "github_hosts_keeper.log",
+  "state_path": "state.json",
+  "backup_dir": "backups",
+
+  "task_name": "GitHubHostsKeeper",
+  "python_executable": "",
+
+  "watchdog_enabled": true,
+  "watchdog_task_name": "GitHubHostsKeeper-Watchdog",
+  "watchdog_interval_minutes": 5,
+  "heartbeat_path": "heartbeat.json",
+  "heartbeat_interval_seconds": 30,
+  "heartbeat_timeout_seconds": 120,
+  "cycle_timeout_seconds": 900,
+  "watchdog_max_restarts_per_hour": 3,
+  "watchdog_verify_delay_seconds": 20,
+  "watchdog_kill_stale_daemon": true,
+  "task_command_timeout_seconds": 40,
+
+  "health_check_enabled": true,
+  "health_check_timeout_seconds": 8,
+  "health_fail_threshold": 2,
+  "health_trigger_cooldown_minutes": 15
+}
