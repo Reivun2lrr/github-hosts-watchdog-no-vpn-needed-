@@ -8,7 +8,7 @@
 
   "dns_timeout_seconds": 6,
   "connect_timeout_seconds": 4,
-  "http_timeout_seconds": 8,
+  "http_timeout_seconds": 12,
   "edge_verify_timeout_seconds": 45,
   "flushdns_timeout_seconds": 15,
   "max_retries": 3,
@@ -60,7 +60,7 @@
   "task_command_timeout_seconds": 40,
 
   "health_check_enabled": true,
-  "health_check_timeout_seconds": 4,
-  "health_fail_threshold": 2,
-  "health_trigger_cooldown_minutes": 5
+  "health_check_timeout_seconds": 10,
+  "health_fail_threshold": 3,
+  "health_trigger_cooldown_minutes": 10
 }

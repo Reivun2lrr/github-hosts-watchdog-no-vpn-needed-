@@ -165,7 +165,10 @@ SEEDS = {
 
 # 探测/巡检必须真正收到响应正文才算可用。只读响应头会把「头通但正文传不下来」
 # 的 IP 误判为最快(表现为浏览器打不开页面、curl 完整下载 0 字节超时)。
-PROBE_BODY_LIMIT = 65536
+# github.com 首页约 525 KB; 只读取前 64 KB 仍会漏掉「传到 400 KB 后被重置」的 IP,
+# 因此探测改为读完整页, 并优先采用能读满正文的 IP。
+PROBE_BODY_LIMIT = 600000
+FULL_PAGE_MIN_BYTES = 500000
 CHECK_BODY_LIMIT = 262144
 
 log = logging.getLogger("ghk")
@@ -434,13 +437,22 @@ def discover(cfg) -> tuple[dict, dict]:
                 r = fu.result()
                 if r:
                     ok.append(r)
-        ok.sort(key=lambda x: x["latency"])
+        # github.com 必须优先选能读满整页正文的 IP; 其余域名仍按原延迟口径排序。
+        def rank(r, need_full=(domain == "github.com")):
+            full = need_full and r["body_bytes"] >= FULL_PAGE_MIN_BYTES
+            if need_full:
+                return (1 if full else 0, -r["latency"] if full else 0, r["body_bytes"])
+            return (0, -r["latency"], 0)
+        ok.sort(key=rank, reverse=True)
         diagnostics[domain] = {"tested": len(candidates), "reachable": len(ok),
+                               "full_page": bool(ok and ok[0]["body_bytes"] >= FULL_PAGE_MIN_BYTES),
                                "doh": (ips or [])[:4]}
         if ok:
             records[domain] = ok[0]["ip"]
             log.info("%-32s -> %-16s (%sms, HTTP %s)", domain, ok[0]["ip"],
                      int(ok[0]["latency"] * 1000), ok[0]["status"])
+            log.debug("%-32s    正文 %dB, 完整=%s", domain, ok[0]["body_bytes"],
+                      ok[0]["body_bytes"] >= FULL_PAGE_MIN_BYTES)
         else:
             log.warning("%-32s -> 无可用 IP (已测 %d 个, 跳过, 不写入 hosts)", domain, len(candidates))
     return records, diagnostics
@@ -691,6 +703,28 @@ def run_cycle(cfg, dry: bool = False) -> tuple[int, dict]:
     log.info("=" * 62)
     log.info("开始检测 (%s)", now())
     records, diag = discover(cfg)
+    # 阻断窗口内整页探测可能全部超时; 本轮无可用 IP 的域名沿用 hosts 中现有的
+    # 受管理记录, 避免把原本可用的条目清空、让 DNS 回落到被污染的系统解析。
+    try:
+        existing, _ = decode_hosts(HOSTS.read_bytes())
+        in_block = False
+        for line in existing.splitlines():
+            s = line.strip()
+            if "GitHub Hosts Keeper BEGIN" in s:
+                in_block = True
+                continue
+            if "GitHub Hosts Keeper END" in s:
+                in_block = False
+                continue
+            if not in_block or not s or s.startswith("#"):
+                continue
+            parts = s.split()
+            if (len(parts) >= 2 and parts[1] in cfg["domains"]
+                    and parts[1] not in records and public_ipv4(parts[0])):
+                records[parts[1]] = parts[0]
+                log.info("%-32s -> 沿用现有记录 %s (本轮无可用 IP)", parts[1], parts[0])
+    except Exception as e:                              # noqa: BLE001
+        log.debug("读取现有 hosts 记录失败: %s", e)
     base = {"last_run": now(), "verified_count": len(records),
             "verified_records": records, "diagnostics": diag}
     if len(records) < int(cfg["min_valid_records"]):
