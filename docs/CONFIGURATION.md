@@ -30,6 +30,12 @@
 | 探测 / Discovery | `probe_workers` | `12` | 并发探测线程数 / Concurrent probe workers |
 | 探测 / Discovery | `domains` | 9 个域名 | 需要维护的 GitHub 域名列表 / GitHub domains to maintain: `github.com`, `api.github.com`, `codeload.github.com`, `raw.githubusercontent.com`, `gist.githubusercontent.com`, `gist.github.com`, `github.global.ssl.fastly.net`, `objects.githubusercontent.com`, `release-assets.githubusercontent.com`（后两项走内置 Fastly 候选池，不做 DoH 查询） |
 | 探测 / Discovery | `doh_endpoints` | 3 个端点 | DoH 查询模板（含 `{domain}` 占位符） / DoH query templates with a `{domain}` placeholder: Alibaba, Cloudflare, Tencent |
+| 热路径 / Hot Path | `hotpath_enabled` | `true` | 常驻亚秒级故障切换总开关；`false` 退回原定时架构 / Master switch; `false` reverts to the timer-based design |
+| 热路径 / Hot Path | `hotpath_interval_ms` | `500` | 当前 IP 检测间隔（毫秒） / Current-IP check interval (ms) |
+| 热路径 / Hot Path | `hotpath_probe_timeout_ms` / `hotpath_connect_timeout_ms` | `900` / `400` | 单次探测总超时 / TCP 快速判死超时（毫秒） / Total probe timeout / fast TCP connect timeout (ms) |
+| 热路径 / Hot Path | `hotpath_fail_threshold` / `hotpath_switch_cooldown_ms` | `1` / `1500` | 触发切换的连续失败次数 / 两次切换最小间隔 / Failures before switch / minimum gap between switches |
+| 热路径 / Hot Path | `hotpath_pool_refresh_ms` / `hotpath_pool_size` / `hotpath_backoff_ms` | `3000` / `8` / `2000` | 池刷新间隔 / 池容量 / 全阻断退避（毫秒） / Pool refresh / size / all-blocked backoff (ms) |
+| 热路径 / Hot Path | `hotpath_pool_path` | `ip_pool.json` | IP 池运行时状态文件，不纳入版本控制 / Runtime pool state file, not version-controlled |
 | 保护 / Safety | `min_valid_records` | `2` | 有效记录少于该值则完全不改动 `hosts` / If fewer valid records exist, `hosts` is left untouched |
 | 验证 / Verification | `verify_url` | `https://github.com` | 写入后的 HTTPS 验证地址，也是手动入口打开的地址 / URL for post-write HTTPS verification and for the manual open entry |
 | 验证 / Verification | `open_edge` | `false` | 已停用：自动打开网页已移除，设为 `true` 也不会生效 / Deprecated: automatic page opening removed; `true` has no effect |

@@ -18,7 +18,11 @@ GitHub Hosts Keeper  --  Windows 自动化维护 GitHub hosts 解析
   9. 所有后台外部命令(PowerShell / ipconfig / 派生 Python)均以无窗口模式执行,
      不出现控制台窗口闪现; 权限级别、提权流程与命令行为保持不变
 
+  10. 热路径(Hot Path): supervisor 内常驻线程维护预热 IP 池, 500ms 级检测当前 IP,
+      失效时亚秒级增量切换 hosts 并直接刷新 Win32 DNS 缓存; 慢速全量探测降为池维护
+
 命令(原有接口全部保留):
+  python github_hosts_keeper.py --hotpath-once  热路径单次检测/切换(新增, 不打开网页)
   python github_hosts_keeper.py --once              单次更新(默认)
   python github_hosts_keeper.py --daemon           守护运行(现为 supervisor)
   python github_hosts_keeper.py --install-task     注册自启 + 看门狗任务(需管理员)
@@ -143,13 +147,25 @@ DEFAULTS = {
     "health_check_timeout_seconds": 8,
     "health_fail_threshold": 2,
     "health_trigger_cooldown_minutes": 15,
+
+    # ---- 热路径: 常驻亚秒级故障切换(与慢速全量探测解耦) ----
+    "hotpath_enabled": True,
+    "hotpath_interval_ms": 500,
+    "hotpath_probe_timeout_ms": 900,
+    "hotpath_connect_timeout_ms": 400,
+    "hotpath_backoff_ms": 2000,
+    "hotpath_fail_threshold": 1,
+    "hotpath_switch_cooldown_ms": 1500,
+    "hotpath_pool_refresh_ms": 3000,
+    "hotpath_pool_size": 8,
+    "hotpath_pool_path": "ip_pool.json",
 }
 
 # 内置候选池: DoH 全失败时仍可工作; 每个候选都必须通过 TLS 证书校验才会被采用
 SEEDS = {
-    "github.com": ["140.82.112.3", "140.82.112.4", "140.82.113.3", "140.82.113.4",
-                   "140.82.114.3", "140.82.114.4", "140.82.116.4", "140.82.121.4",
-                   "20.205.243.166", "20.200.245.247", "20.27.177.113"],
+    "github.com": ["20.27.177.113", "20.205.243.166", "140.82.112.3", "140.82.112.4",
+                   "140.82.113.3", "140.82.113.4", "140.82.114.3", "140.82.114.4",
+                   "140.82.116.4", "140.82.121.4", "20.200.245.247"],
     "gist.github.com": ["140.82.112.3", "140.82.114.4", "20.205.243.166"],
     "api.github.com": ["140.82.112.5", "140.82.112.6", "140.82.114.5", "140.82.114.6",
                        "20.205.243.168"],
@@ -182,8 +198,12 @@ FULL_PAGE_MIN_BYTES = 500000
 # 表现为 state.json=success 但浏览器打不开。改为读满整页并校验字节数。
 CHECK_BODY_LIMIT = 600000
 
+# 热路径微探测只要求响应头 + 至少 4 KB 正文; 整页 500 KB 校验仍由全量 discover 承担。
+HOTPATH_MIN_BODY = 4096
+
 log = logging.getLogger("ghk")
 _stop = threading.Event()
+CYCLE_RUNNING = threading.Event()   # supervisor 跑 worker 时, 热路径暂停写 hosts 避免并发写冲突
 
 
 # ---------------------------------------------------------------- 基础设施
@@ -424,51 +444,63 @@ def probe(domain: str, ip: str, cfg) -> dict | None:
         return None
 
 
-def discover(cfg) -> tuple[dict, dict]:
-    """返回 (域名->最快可用IP, 诊断信息)"""
-    diagnostics = {}
-    records = {}
-    cap = int(cfg["max_candidates_per_domain"])
-    for domain in cfg["domains"]:
-        if domain in SEED_ONLY_DOMAINS:
-            ips = []                      # 固定 CDN 段: 跳过被污染的 DoH 查询
-        else:
-            def query_or_raise(d=domain):
-                r = doh_query(d, cfg)
-                if not r:
-                    raise RuntimeError("所有 DoH 端点均无响应")
-                return r
-            ips, _ = with_retries(query_or_raise, cfg, f"DoH-{domain}")
-        candidates = []
-        for ip in (ips or []) + SEEDS.get(domain, []):
-            if ip not in candidates and public_ipv4(ip):
-                candidates.append(ip)
-        candidates = candidates[:cap]
-        ok = []
-        with ThreadPoolExecutor(max_workers=int(cfg["probe_workers"])) as pool:
+def _discover_one(domain: str, cfg) -> tuple[str, str | None, dict]:
+    """单域名探测; 供域名级并发调用。"""
+    if domain in SEED_ONLY_DOMAINS:
+        ips = []                       # 固定 CDN 段: 跳过被污染的 DoH 查询
+    else:
+        def query_or_raise(d=domain):
+            r = doh_query(d, cfg)
+            if not r:
+                raise RuntimeError("所有 DoH 端点均无响应")
+            return r
+        ips, _ = with_retries(query_or_raise, cfg, f"DoH-{domain}")
+    candidates = []
+    for ip in (ips or []) + SEEDS.get(domain, []):
+        if ip not in candidates and public_ipv4(ip):
+            candidates.append(ip)
+    candidates = candidates[:int(cfg["max_candidates_per_domain"])]
+    ok = []
+    if candidates:
+        with ThreadPoolExecutor(max_workers=min(int(cfg["probe_workers"]), len(candidates))) as pool:
             futures = {pool.submit(probe, domain, ip, cfg): ip for ip in candidates}
             for fu in as_completed(futures):
                 r = fu.result()
                 if r:
                     ok.append(r)
-        # github.com 必须优先选能读满整页正文的 IP; 其余域名仍按原延迟口径排序。
-        def rank(r, need_full=(domain == "github.com")):
-            full = need_full and r["body_bytes"] >= FULL_PAGE_MIN_BYTES
-            if need_full:
-                return (1 if full else 0, -r["latency"] if full else 0, r["body_bytes"])
-            return (0, -r["latency"], 0)
-        ok.sort(key=rank, reverse=True)
-        diagnostics[domain] = {"tested": len(candidates), "reachable": len(ok),
-                               "full_page": bool(ok and ok[0]["body_bytes"] >= FULL_PAGE_MIN_BYTES),
-                               "doh": ["seed-only"] if domain in SEED_ONLY_DOMAINS else (ips or [])[:4]}
-        if ok:
-            records[domain] = ok[0]["ip"]
-            log.info("%-32s -> %-16s (%sms, HTTP %s)", domain, ok[0]["ip"],
-                     int(ok[0]["latency"] * 1000), ok[0]["status"])
-            log.debug("%-32s    正文 %dB, 完整=%s", domain, ok[0]["body_bytes"],
-                      ok[0]["body_bytes"] >= FULL_PAGE_MIN_BYTES)
-        else:
-            log.warning("%-32s -> 无可用 IP (已测 %d 个, 跳过, 不写入 hosts)", domain, len(candidates))
+
+    def rank(r, need_full=(domain == "github.com")):
+        full = need_full and r["body_bytes"] >= FULL_PAGE_MIN_BYTES
+        if need_full:
+            return (1 if full else 0, -r["latency"], r["body_bytes"])
+        return (0, -r["latency"], 0)
+    ok.sort(key=rank, reverse=True)
+    diag = {"tested": len(candidates), "reachable": len(ok),
+            "full_page": bool(ok and ok[0]["body_bytes"] >= FULL_PAGE_MIN_BYTES),
+            "doh": ["seed-only"] if domain in SEED_ONLY_DOMAINS else (ips or [])[:4]}
+    if ok:
+        log.info("%-32s -> %-16s (%sms, HTTP %s)", domain, ok[0]["ip"],
+                 int(ok[0]["latency"] * 1000), ok[0]["status"])
+        return domain, ok[0]["ip"], diag
+    log.warning("%-32s -> 无可用 IP (已测 %d 个, 跳过, 不写入 hosts)", domain, len(candidates))
+    return domain, None, diag
+
+
+def discover(cfg) -> tuple[dict, dict]:
+    """返回 (域名->最快可用IP, 诊断信息)。
+
+    9 个域名并发执行, 单轮耗时从各域名串行之和降为最慢域名耗时。
+    域名内候选 IP 仍并发探测, 判定口径(整页正文/TLS 校验)保持原样。
+    """
+    records, diagnostics = {}, {}
+    domains = list(cfg["domains"])
+    with ThreadPoolExecutor(max_workers=min(6, len(domains))) as pool:
+        futs = [pool.submit(_discover_one, d, cfg) for d in domains]
+        for fu in as_completed(futs):
+            d, ip, diag = fu.result()
+            diagnostics[d] = diag
+            if ip:
+                records[d] = ip
     return records, diagnostics
 
 
@@ -604,6 +636,311 @@ def apply_hosts(cfg, records: dict) -> dict:
         info["rollback"] = True
         raise
     return info
+
+
+# ---------------------------------------------------------------- 热路径 (亚秒级故障切换)
+#
+# 旧架构: 全量 discover 每 10~25 分钟一轮(单轮约 90s), 外部看门狗 2 分钟巡检 +
+# 连续 2 次失败 + 3 分钟冷却, IP 失效后需数分钟恢复, 浏览器表现为
+# ERR_CONNECTION_TIMED_OUT。
+# 新架构: supervisor 内常驻热路径线程, 与慢速全量探测解耦:
+#   1) 并发微探测维护 github.com 预热 IP 池(TCP+TLS 校验+响应头+首段正文, 数百 ms)
+#   2) 每 500ms 检查当前 hosts IP, 失效即从池内取 RTT 最低的可用 IP
+#   3) 增量替换 hosts 单行 + Win32 DnsFlushResolverCache(无子进程), 目标 < 500ms
+#   4) 全量 discover 降为池维护, 仍负责其余 8 个域名与整页正文校验
+# 对外行为不变: CLI、日志、state/heartbeat、hosts 受管理区块、备份/回滚、
+#              不自动打开网页、桌面工具全部保持原样。
+
+def fast_flush_dns(cfg) -> float:
+    """Win32 DNS 缓存刷新, 无子进程(通常 <5ms); 不可用则回退 ipconfig。"""
+    t0 = time.perf_counter()
+    if os.name == "nt":
+        try:
+            if ctypes.windll.dnsapi.DnsFlushResolverCache() == 0:
+                raise OSError("DnsFlushResolverCache 返回 0")
+            return (time.perf_counter() - t0) * 1000
+        except Exception as e:                          # noqa: BLE001
+            log.debug("快速 DNS 刷新不可用, 回退 ipconfig: %s", e)
+    flush_dns(cfg)
+    return (time.perf_counter() - t0) * 1000
+
+
+def micro_probe(domain: str, ip: str, timeout_ms: int, connect_ms: int = 400) -> dict:
+    """轻量探测: TCP + TLS 证书校验 + 响应头 + 至少 4KB 正文。
+
+    connect_ms 单独设短: 链路被整体阻断时 TCP 握手必然超时, 400ms 即可判死,
+    不必等完整 timeout_ms; 正常链路 TCP 约 110ms、TLS 约 250ms, 不会被误伤。
+    """
+    t0 = time.perf_counter()
+    deadline = t0 + timeout_ms / 1000.0
+
+    def left() -> float:
+        return max(0.03, deadline - time.perf_counter())
+
+    r = {"ip": ip, "ok": False, "rtt_ms": None}
+    try:
+        if not ip or not public_ipv4(ip):
+            r["reason"] = "invalid_ip"
+            return r
+        ctx = ssl.create_default_context()             # check_hostname=True, CERT_REQUIRED
+        with socket.create_connection((ip, 443), timeout=connect_ms / 1000.0) as raw:
+            raw.settimeout(left())
+            with ctx.wrap_socket(raw, server_hostname=domain) as s:
+                s.settimeout(left())
+                s.sendall((f"GET / HTTP/1.1\r\nHost: {domain}\r\n"
+                           "User-Agent: GitHubHostsKeeper-HotPath/1.0\r\n"
+                           "Accept: */*\r\nConnection: close\r\n\r\n").encode("ascii"))
+                head = b""
+                while b"\r\n\r\n" not in head and len(head) < 16384 and time.perf_counter() < deadline:
+                    s.settimeout(left())
+                    c = s.recv(4096)
+                    if not c:
+                        break
+                    head += c
+                m = re.search(rb"HTTP/[\d.]+ (\d{3})", head)
+                if not m or int(m.group(1)) >= 500:
+                    r["reason"] = "bad_status"
+                    return r
+                body = head.split(b"\r\n\r\n", 1)[1] if b"\r\n\r\n" in head else b""
+                while len(body) < HOTPATH_MIN_BODY and time.perf_counter() < deadline:
+                    s.settimeout(left())
+                    c = s.recv(4096)
+                    if not c:
+                        break
+                    body += c
+                if len(body) < HOTPATH_MIN_BODY:
+                    r["reason"] = f"正文不完整({len(body)}B)"
+                    return r
+                r.update({"ok": True, "status": int(m.group(1)), "body_bytes": len(body),
+                          "rtt_ms": round((time.perf_counter() - t0) * 1000, 1)})
+    except Exception as e:                             # noqa: BLE001
+        r["reason"] = classify_error(e)
+        r["rtt_ms"] = round((time.perf_counter() - t0) * 1000, 1)
+    return r
+
+
+def load_ip_pool(cfg) -> dict:
+    p = resolve(cfg["hotpath_pool_path"])
+    try:
+        d = json.loads(p.read_text(encoding="utf-8"))
+        if isinstance(d, dict) and isinstance(d.get("entries"), dict):
+            return d
+    except Exception:                                  # noqa: BLE001
+        pass
+    return {"entries": {}, "updated_at": None, "active_ip": None, "switches": 0}
+
+
+def save_ip_pool(cfg, pool: dict):
+    p = resolve(cfg["hotpath_pool_path"])
+    try:
+        tmp = p.with_name(p.name + ".tmp")
+        tmp.write_text(json.dumps(pool, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(p)
+    except Exception as e:                             # noqa: BLE001
+        log.debug("IP 池写入失败(不影响主流程): %s", e)
+
+
+def pool_candidates(cfg, pool: dict) -> list[str]:
+    ips = list(SEEDS.get("github.com", [])) + list(pool["entries"].keys())
+    out, seen = [], set()
+    for ip in ips:
+        if ip not in seen and public_ipv4(ip):
+            seen.add(ip)
+            out.append(ip)
+    return out[:int(cfg["hotpath_pool_size"])]
+
+
+def refresh_pool(cfg, pool: dict, domain: str, timeout_ms: int) -> list[dict]:
+    cands = pool_candidates(cfg, pool)
+    connect_ms = int(cfg["hotpath_connect_timeout_ms"])
+    with ThreadPoolExecutor(max_workers=min(12, max(1, len(cands)))) as ex:
+        results = list(ex.map(lambda ip: micro_probe(domain, ip, timeout_ms, connect_ms), cands))
+    entries = pool["entries"]
+    for r in results:
+        e = entries.setdefault(r["ip"], {"ok": 0, "fail": 0, "rtt_ms": None})
+        if r["ok"]:
+            e["ok"] += 1
+            e["fail"] = 0
+            e["rtt_ms"] = r["rtt_ms"]
+            e["last_ok"] = now()
+        else:
+            # 保留 rtt_ms: 间歇阻断时池不能一轮失败就清空, 否则下一刻无备用 IP 可切。
+            # 连续失败计数达到阈值后由 best_pool_ip 暂时淘汰, 一旦恢复成功即自动复活。
+            e["fail"] = int(e.get("fail", 0)) + 1
+            e["last_fail"] = now()
+    pool["updated_at"] = now()
+    return results
+
+
+def current_host_ip(domain: str = "github.com") -> str | None:
+    try:
+        text, _ = decode_hosts(HOSTS.read_bytes())
+        for line in text.splitlines():
+            m = IPV4.match(line)
+            if m and m.group(2).lower() == domain:
+                return m.group(1)
+    except Exception:                                  # noqa: BLE001
+        pass
+    return None
+
+
+def best_pool_ip(cfg, pool: dict, exclude: str | None) -> str | None:
+    """选延迟最低的备用 IP; 允许近期有少量失败, 避免间歇阻断时池被判空。"""
+    ranked = sorted(
+        ((e.get("fail", 0), e.get("rtt_ms"), ip) for ip, e in pool["entries"].items()
+         if e.get("rtt_ms") is not None and e.get("fail", 0) <= 2 and ip != exclude),
+        key=lambda x: (x[0], x[1]))
+    return ranked[0][2] if ranked else None
+
+
+def switch_domain_ip(cfg, domain: str, new_ip: str) -> dict:
+    """增量替换受管理区块内某一行; 带备份/校验/回滚, 其余内容字节不变。"""
+    t0 = time.perf_counter()
+    if not is_admin():
+        return {"ok": False, "reason": "需要管理员权限", "elapsed_ms": 0}
+    try:
+        raw = HOSTS.read_bytes()
+        text, enc = decode_hosts(raw)
+        nl = "\r\n" if "\r\n" in text else "\n"
+        lines = text.splitlines()
+        in_block, found, out = False, False, []
+        for line in lines:
+            st = line.strip()
+            if st == BEGIN:
+                in_block = True
+                out.append(line)
+                continue
+            if st == END:
+                if in_block and not found:
+                    out.append(f"{new_ip}    {domain}")
+                    found = True
+                in_block = False
+                out.append(line)
+                continue
+            m = IPV4.match(line)
+            if in_block and m and m.group(2).lower() == domain:
+                if not found:
+                    out.append(f"{new_ip}    {domain}")
+                    found = True
+                continue
+            out.append(line)
+        if not found:
+            return {"ok": False, "reason": "hosts 无受管理区块, 交由全量流程处理",
+                    "elapsed_ms": round((time.perf_counter() - t0) * 1000, 1)}
+        new_raw = (nl.join(out) + nl).encode(enc)
+        if new_raw == raw:
+            return {"ok": True, "changed": False,
+                    "elapsed_ms": round((time.perf_counter() - t0) * 1000, 1)}
+        backup = backup_hosts(cfg, raw)
+        try:
+            write_hosts_bytes(new_raw)
+            if HOSTS.read_bytes() != new_raw:
+                raise OSError("hosts 写入后内容校验失败")
+        except Exception as e:                         # noqa: BLE001
+            rollback(cfg, raw, backup, f"热路径切换异常: {e}")
+            return {"ok": False, "reason": str(e),
+                    "elapsed_ms": round((time.perf_counter() - t0) * 1000, 1)}
+        dns_ms = fast_flush_dns(cfg)
+        return {"ok": True, "changed": True, "to": new_ip, "dns_ms": round(dns_ms, 2),
+                "elapsed_ms": round((time.perf_counter() - t0) * 1000, 1)}
+    except Exception as e:                             # noqa: BLE001
+        return {"ok": False, "reason": f"{type(e).__name__}: {e}",
+                "elapsed_ms": round((time.perf_counter() - t0) * 1000, 1)}
+
+
+def hotpath_once(cfg) -> int:
+    """单次热路径检测(验证/手动触发用); 输出 JSON 指标, 绝不打开网页。"""
+    domain, t0 = "github.com", time.perf_counter()
+    timeout_ms = int(cfg["hotpath_probe_timeout_ms"])
+    connect_ms = int(cfg["hotpath_connect_timeout_ms"])
+    pool = load_ip_pool(cfg)
+    results = refresh_pool(cfg, pool, domain, timeout_ms)
+    cur = current_host_ip(domain)
+    probe = (micro_probe(domain, cur, timeout_ms, connect_ms) if cur
+             else {"ok": False, "reason": "无 hosts 记录"})
+    out = {"current_ip": cur, "current_probe": probe,
+           "pool": [{"ip": r["ip"], "ok": r["ok"], "rtt_ms": r["rtt_ms"]} for r in results],
+           "switched": None, "elapsed_ms": None}
+    if not probe["ok"]:
+        pick = best_pool_ip(cfg, pool, cur)
+        if pick and not CYCLE_RUNNING.is_set():
+            out["switched"] = switch_domain_ip(cfg, domain, pick)
+            if out["switched"]["ok"]:
+                pool["active_ip"] = pick
+                pool["switches"] = int(pool.get("switches", 0)) + 1
+        elif not pick:
+            out["switched"] = {"ok": False, "reason": "池中暂无可用备用 IP"}
+    save_ip_pool(cfg, pool)
+    out["elapsed_ms"] = round((time.perf_counter() - t0) * 1000, 1)
+    print(json.dumps(out, ensure_ascii=False, indent=2))
+    return 0 if probe["ok"] or (out["switched"] and out["switched"]["ok"]) else 4
+
+
+def hotpath_loop(cfg, stop_event: threading.Event, domain: str = "github.com"):
+    """常驻热路径: 池刷新 + 当前 IP 检测 + 亚秒级切换。"""
+    interval = float(cfg["hotpath_interval_ms"]) / 1000.0
+    timeout_ms = int(cfg["hotpath_probe_timeout_ms"])
+    refresh_s = float(cfg["hotpath_pool_refresh_ms"]) / 1000.0
+    cooldown = float(cfg["hotpath_switch_cooldown_ms"]) / 1000.0
+    threshold = max(1, int(cfg["hotpath_fail_threshold"]))
+    connect_ms = int(cfg["hotpath_connect_timeout_ms"])
+    backoff_s = float(cfg["hotpath_backoff_ms"]) / 1000.0
+    pool = load_ip_pool(cfg)
+    failures, last_switch, last_refresh, last_warn = 0, 0.0, 0.0, 0.0
+    log.info("热路径启动: 间隔=%sms 探测=%sms/连接=%sms 失败阈值=%s 池刷新=%sms 冷却=%sms 退避=%sms",
+             cfg["hotpath_interval_ms"], timeout_ms, connect_ms, threshold,
+             cfg["hotpath_pool_refresh_ms"], cfg["hotpath_switch_cooldown_ms"],
+             cfg["hotpath_backoff_ms"])
+    while not stop_event.is_set():
+        tick0 = time.perf_counter()
+        degraded = False
+        try:
+            if tick0 - last_refresh >= refresh_s:
+                refresh_pool(cfg, pool, domain, timeout_ms)
+                save_ip_pool(cfg, pool)
+                last_refresh = time.perf_counter()
+            cur = current_host_ip(domain)
+            r = (micro_probe(domain, cur, timeout_ms, connect_ms) if cur
+                 else {"ok": False, "reason": "无 hosts 记录"})
+            if r["ok"]:
+                failures = 0
+            else:
+                failures += 1
+                busy, cooling = CYCLE_RUNNING.is_set(), time.perf_counter() - last_switch < cooldown
+                if failures >= threshold and not busy and not cooling:
+                    pick = best_pool_ip(cfg, pool, cur)
+                    if pick:
+                        old, sw = cur, switch_domain_ip(cfg, domain, pick)
+                        if sw.get("ok"):
+                            last_switch = time.perf_counter()
+                            failures = 0
+                            pool["active_ip"] = pick
+                            pool["switches"] = int(pool.get("switches", 0)) + 1
+                            pool["last_switch"] = {"at": now(), "from": old, "to": pick,
+                                                   "reason": r.get("reason"), **sw}
+                            save_ip_pool(cfg, pool)
+                            log.info("热路径切换 %s -> %s 耗时 %.1fms (DNS %.2fms, 原因: %s)",
+                                     old, pick, sw["elapsed_ms"], sw.get("dns_ms", -1),
+                                     r.get("reason"))
+                        else:
+                            degraded = True
+                            log.warning("热路径切换失败: %s", sw.get("reason"))
+                    else:
+                        # 所有候选 IP 同时不可达 = 网络层整体阻断, 本机无法自愈;
+                        # 退避并节流日志, 避免无效连接风暴与日志刷屏。
+                        degraded = True
+                        if time.perf_counter() - last_warn >= 10:
+                            last_warn = time.perf_counter()
+                            log.warning("热路径: 当前 IP 不可用且池中无可用备用 IP (%s); "
+                                        "属网络层整体阻断, 退避至 %sms 等待链路恢复",
+                                        r.get("reason"), cfg["hotpath_backoff_ms"])
+        except Exception as e:                         # noqa: BLE001 - 热路径不能拖垮 supervisor
+            degraded = True
+            log.warning("热路径单轮异常: %s: %s", type(e).__name__, e)
+        wait_s = max(0.05, interval - (time.perf_counter() - tick0))
+        if degraded:
+            wait_s = max(wait_s, backoff_s)
+        stop_event.wait(wait_s)
 
 
 # ---------------------------------------------------------------- 访问验证
@@ -1085,6 +1422,9 @@ def run_daemon(cfg) -> int:
     log.info("supervisor 启动 PID=%s (间隔 %s~%s 分钟, worker 超时 %ss)",
              os.getpid(), cfg["interval_min_minutes"], cfg["interval_max_minutes"],
              cfg["cycle_timeout_seconds"])
+    if cfg.get("hotpath_enabled", True):
+        threading.Thread(target=hotpath_loop, args=(cfg, _stop),
+                         name="hotpath", daemon=True).start()
     signal.signal(signal.SIGINT, lambda *_: _stop.set())
     signal.signal(signal.SIGTERM, lambda *_: _stop.set())
     while not _stop.is_set():
@@ -1094,7 +1434,11 @@ def run_daemon(cfg) -> int:
         except Exception as e:                     # noqa: BLE001
             log.error("配置重载失败, 沿用上次配置: %s", e)
         write_heartbeat(cfg, state="cycle", started_at=started)
-        rc, detail = run_worker(cfg)
+        CYCLE_RUNNING.set()
+        try:
+            rc, detail = run_worker(cfg)
+        finally:
+            CYCLE_RUNNING.clear()
         st = load_state(cfg)
         wd = dict(st.get("watchdog", {}))
         if rc == -2:
@@ -1210,6 +1554,10 @@ def show_status(cfg):
         print(f"  {'访问巡检':22s}: {hl.get('last_check')} ok={hl.get('last_ok')} "
               f"连续失败={hl.get('consecutive_failures', 0)} 触发={hl.get('total_triggers', 0)} "
               f"({hl.get('last_reason')})")
+    hp = load_ip_pool(cfg)
+    print(f"  {'热路径':22s}: {'启用' if cfg.get('hotpath_enabled', True) else '禁用'} "
+          f"切换={hp.get('switches', 0)} 当前={hp.get('active_ip') or current_host_ip() or '-'} "
+          f"可用池={sum(1 for e in hp['entries'].values() if e.get('rtt_ms') is not None and e.get('fail', 0) <= 2)}/{len(hp['entries'])}")
     print(f"  {'任务 / 看门狗任务':22s}: {cfg['task_name']} / {wd_name(cfg) if cfg['watchdog_enabled'] else '禁用'}")
     if st.get("verified_records"):
         print("  当前生效记录:")
@@ -1261,6 +1609,8 @@ def main() -> int:
     ap.add_argument("--cycle", action="store_true", help="内部: 执行单轮更新")
     ap.add_argument("--open", action="store_true", dest="open_page",
                     help="【手动入口】用默认浏览器打开 GitHub 网页(唯一会显示网页的命令)")
+    ap.add_argument("--hotpath-once", action="store_true", dest="hotpath_once",
+                    help="热路径单次检测/切换(不打开网页, 输出 JSON 指标)")
     a = ap.parse_args()
     try:
         cfg = load_config()
@@ -1271,6 +1621,8 @@ def main() -> int:
     # 必须最先处理: --open 是唯一会显示网页的分支, 且只由用户主动执行到达。
     if a.open_page:
         return open_github_page(cfg)
+    if a.hotpath_once:
+        return hotpath_once(cfg)
     if a.status:
         show_status(cfg)
         return 0

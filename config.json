@@ -64,5 +64,15 @@
   "health_check_enabled": true,
   "health_check_timeout_seconds": 10,
   "health_fail_threshold": 2,
-  "health_trigger_cooldown_minutes": 3
+  "health_trigger_cooldown_minutes": 3,
+    "hotpath_enabled": true,
+    "hotpath_interval_ms": 500,
+    "hotpath_probe_timeout_ms": 900,
+    "hotpath_connect_timeout_ms": 400,
+    "hotpath_backoff_ms": 2000,
+    "hotpath_fail_threshold": 1,
+    "hotpath_switch_cooldown_ms": 1500,
+    "hotpath_pool_refresh_ms": 3000,
+    "hotpath_pool_size": 8,
+    "hotpath_pool_path": "ip_pool.json"
 }

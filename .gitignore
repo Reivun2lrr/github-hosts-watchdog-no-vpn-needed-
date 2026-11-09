@@ -1,6 +1,7 @@
 # Runtime state / 运行时产物（由程序自动生成，含本机信息）
 state.json
 heartbeat.json
+ip_pool.json
 github_hosts_keeper.log
 github_hosts_keeper.log.*
 backups/

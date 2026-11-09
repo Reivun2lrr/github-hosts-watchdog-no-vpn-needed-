@@ -44,7 +44,41 @@
 | `LICENSE` | MIT 许可证 |
 | `.gitignore` | 排除运行时产物与本机数据 |
 
-运行时产物 `state.json`、`heartbeat.json`、`github_hosts_keeper.log`、`backups/` 由程序自动生成，不纳入版本控制。
+运行时产物 `state.json`、`heartbeat.json`、`ip_pool.json`、`github_hosts_keeper.log`、`backups/` 由程序自动生成，不纳入版本控制。
+
+### 性能与热路径架构
+
+**测量口径**（本机直连、禁用代理，用 `curl --noproxy '*'` 实测）：
+
+| 指标 | 定义 |
+|---|---|
+| TTFB | `curl %{time_starttransfer}`，发起到收到首字节 |
+| 完整加载 | `curl %{time_total}` 且 `size_download >= 500000`（GitHub 首页约 525 KB） |
+| 故障检测 | 热路径发现当前 hosts IP 不可用的耗时；TCP 连接 400 ms 超时即判死 |
+| 切换事务 | 决定切换 → 单行改写 hosts → 校验 → DNS 缓存生效的墙钟时间 |
+| 端到端恢复 | 故障检测 + 切换事务，即链路失效到新 IP 可供浏览器使用 |
+| 全量单轮 | `discover()` 完成 9 个域名探测的耗时 |
+
+**目标阈值**：故障检测 < 500 ms、切换事务 < 50 ms、**端到端恢复 < 500 ms**；TTFB P95 < 900 ms、完整加载 P95 < 2.5 s。
+
+**优化前后对比**（2026-11-09 实测）：
+
+| 指标 | 优化前 | 优化后 |
+|---|---|---|
+| 端到端恢复 | 约 6 分钟（2 min 巡检 × 2 次失败 + 3 min 冷却 + 96 s 全量探测） | **约 426 ms**（400 ms 检测 + 26.2 ms 切换，日志 `热路径切换 ... 耗时 26.2ms`） |
+| 故障时浏览器表现 | `ERR_CONNECTION_TIMED_OUT`，8–20 s 超时 | 亚秒级自动切换 |
+| 全量单轮 | 96 s（9 域名串行） | **31 s**（域名级并发；确定性基准 2721 → 612 ms，4.45×） |
+| 切换事务 | 整块重建 + `ipconfig /flushdns` 子进程 | **26.2 ms**（单行增量替换 + Win32 DNS 刷新 7.12 ms） |
+| TTFB / 完整加载 | 正常窗口 0.43–0.50 s / 1.07 s；故障时无响应 | 0.437–0.863 s / 1.175–2.274 s（8 次采样 7 次完整成功） |
+
+**架构**：supervisor 内常驻「热路径」线程，与慢速全量探测解耦。后台每 3 s 并发微探测内置候选池，维护 `ip_pool.json`（RTT 与失败计数）；每 500 ms 检查当前 `github.com` 记录，连接探测失败即从池中取 RTT 最低的备用 IP，单行增量改写 hosts 并直接调用 Win32 DNS 刷新。全量 `discover()` 降为池维护，仍负责其余 8 个域名与整页 500 KB 正文校验；worker 运行期间热路径暂停写 hosts（`CYCLE_RUNNING`）避免并发写冲突。所有候选 IP 同时不可达时进入 2 s 退避并节流日志，不产生无效连接风暴。
+
+**取舍与影响范围**：
+
+- 跨境 TCP/TLS 握手本身约 250–450 ms，525 KB 页面传输另需 0.7–1.5 s，**TTFB 与完整加载无法做到个位/十位毫秒级**；「毫秒级」目标落在**本机可控的故障检测与切换**（分钟级 → 数百毫秒）。突破网络层下限需境内加速或合规代理，会改变「无需代理」定位，本次未引入。
+- 所有候选 IP 同时被网络层阻断时（实测出现过），hosts 方案无法自愈，热路径退避等待链路恢复；这是物理边界，不是程序缺陷。
+- 新增 `ip_pool.json` 运行时状态、`--hotpath-once` 命令与 `hotpath_*` 配置项；其余 CLI、日志、`state.json` / `heartbeat.json`、hosts 受管理区块、备份回滚、桌面工具、不自动打开网页的行为均保持不变。
+- 热路径持续探测约 1–3 次/秒 HTTPS 请求；`hotpath_enabled: false` 可一键退回原定时架构。
 
 ### 代码结构导览
 
@@ -152,7 +186,41 @@ Editing `hosts` once only works for a few days — GitHub becomes unreachable ag
 | `LICENSE` | MIT License |
 | `.gitignore` | Excludes runtime artifacts and local data |
 
-Runtime artifacts `state.json`, `heartbeat.json`, `github_hosts_keeper.log`, and `backups/` are generated automatically and are not version-controlled.
+Runtime artifacts `state.json`, `heartbeat.json`, `ip_pool.json`, `github_hosts_keeper.log`, and `backups/` are generated automatically and are not version-controlled.
+
+### Performance & Hot Path
+
+**Measurement definitions** (direct connection, no proxy, measured with `curl --noproxy '*'`):
+
+| Metric | Definition |
+|---|---|
+| TTFB | `curl %{time_starttransfer}`, request start to first byte |
+| Full load | `curl %{time_total}` with `size_download >= 500000` (GitHub homepage ~525 KB) |
+| Failure detection | Time for the hot path to detect the current hosts IP is down; TCP connect times out at 400 ms |
+| Switch transaction | Decision → single-line hosts rewrite → verification → DNS cache flush, wall clock |
+| End-to-end recovery | Failure detection + switch transaction, i.e. link failure to a usable new IP |
+| Full cycle | Time for `discover()` to probe all 9 domains |
+
+**Targets**: failure detection < 500 ms, switch transaction < 50 ms, **end-to-end recovery < 500 ms**; TTFB P95 < 900 ms, full load P95 < 2.5 s.
+
+**Before / after** (measured 2026-11-09):
+
+| Metric | Before | After |
+|---|---|---|
+| End-to-end recovery | ~6 min (2 min poll × 2 failures + 3 min cooldown + 96 s full probe) | **~426 ms** (400 ms detection + 26.2 ms switch; log: `hotpath switch ... 26.2ms`) |
+| Browser during failure | `ERR_CONNECTION_TIMED_OUT`, 8–20 s timeouts | Sub-second automatic switch |
+| Full cycle | 96 s (9 domains serial) | **31 s** (domain-level concurrency; deterministic baseline 2721 → 612 ms, 4.45×) |
+| Switch transaction | Full rebuild + `ipconfig /flushdns` subprocess | **26.2 ms** (single-line delta + Win32 DNS flush 7.12 ms) |
+| TTFB / full load | 0.43–0.50 s / 1.07 s in a good window; no response during failure | 0.437–0.863 s / 1.175–2.274 s (7 of 8 samples fully loaded) |
+
+**Architecture**: a resident "hot path" thread inside the supervisor is decoupled from the slow full probe. Every 3 s it concurrently micro-probes the built-in candidate pool and maintains `ip_pool.json` (RTT + failure counts); every 500 ms it checks the current `github.com` record and, on a failed connect probe, picks the lowest-RTT standby IP, rewrites a single hosts line, and calls the Win32 DNS flush API directly. The full `discover()` is demoted to pool maintenance and still handles the other 8 domains plus 500 KB full-page body validation. While a worker cycle runs, the hot path pauses hosts writes (`CYCLE_RUNNING`) to avoid concurrent writes. When every candidate IP is unreachable it backs off to 2 s and throttles logging, avoiding a connection storm.
+
+**Trade-offs and scope**:
+
+- Cross-border TCP/TLS handshake alone costs 250–450 ms, and transferring 525 KB adds 0.7–1.5 s. **TTFB and full load cannot reach single- or double-digit milliseconds**; the "millisecond" target applies to the **locally controllable detection and switch** (minutes → a few hundred ms). Beating the network floor would require domestic acceleration or a compliant proxy, changing the project's "no VPN" premise; not introduced here.
+- When all candidate IPs are blocked at the network layer simultaneously (observed during testing), no hosts-based approach can recover; the hot path backs off and waits. This is a physical boundary, not a defect.
+- Added: `ip_pool.json` runtime state, the `--hotpath-once` command, and `hotpath_*` config keys. All other CLIs, logs, `state.json` / `heartbeat.json`, the managed hosts block, backup/rollback, the desktop tool, and the no-auto-open-browser behavior are unchanged.
+- Sustained probing generates roughly 1–3 HTTPS requests/second; set `hotpath_enabled: false` to revert to the original timer-based architecture.
 
 ### Code Map
 
