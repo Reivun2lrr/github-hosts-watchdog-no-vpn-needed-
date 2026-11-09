@@ -32,7 +32,7 @@
 ### 已知无法覆盖的场景
 
 - 网络对全部 GitHub IP 实施 TLS/SNI 层干扰时，`hosts` 方案物理上无法恢复网页访问，需换网络或使用合规代理。
-- 覆盖范围仅配置中的 7 个域名；SSH、IPv6、头像 / Release 附件域名未纳入。
+- 覆盖范围为配置中的 9 个域名，含 2 个 Release 附件 CDN 域名；SSH 与 IPv6 未纳入。
 - GitHub 账号登录态、cookie、2FA、组织 SSO、私有仓库授权与本工具无关。
 
 完整配置说明见 [`CONFIGURATION.md`](CONFIGURATION.md)，项目说明见 [`../README.md`](../README.md)。
@@ -67,7 +67,7 @@ This page lists the conditions required before running GitHub Hosts Watchdog. If
 ### Known out-of-scope scenarios
 
 - When a network applies TLS/SNI-level interference to every GitHub IP, editing `hosts` physically cannot restore web access; change networks or use a compliant proxy.
-- Coverage is limited to the 7 domains in the configuration; SSH, IPv6, and avatar / release-asset domains are excluded.
+- Coverage covers all 9 domains in the configuration, including 2 release-asset CDN domains; SSH and IPv6 are excluded.
 - GitHub login state, cookies, 2FA, organization SSO, and private-repository authorization are unrelated to this tool.
 
 See [`CONFIGURATION.md`](CONFIGURATION.md) for the full configuration reference and [`../README.md`](../README.md) for the project overview.

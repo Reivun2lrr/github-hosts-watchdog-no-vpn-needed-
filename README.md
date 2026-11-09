@@ -37,6 +37,7 @@
 | `config.example.json` | 与默认配置一致的对照模板，用于改坏后恢复默认值 |
 | `run-as-admin.bat` | 一键启动器：申请 UAC → 注册两个计划任务 → 交由无窗口守护进程接管 |
 | `open-github.bat` | **唯一手动入口**：双击才用默认浏览器打开 GitHub；任何后台流程都不会调用它 |
+| `quick-connect.bat` | 一键直连：后台触发一次看门狗巡检，再用默认浏览器打开 GitHub；桌面快捷工具为同一份文件的副本 |
 | `README.md` | 本文件（中英双语，含快速开始、常见问题与代码结构导览） |
 | `docs/PREREQUISITES.md` | 使用前提（系统、权限、网络、会话） |
 | `docs/CONFIGURATION.md` | 配置要求：全部配置项、默认值与调优建议 |
@@ -107,7 +108,7 @@ py -3 github_hosts_keeper.py --status
 - **能力边界**：只能解决 DNS 解析层面问题。TLS/SNI 层全量干扰、`DoH` 与候选池全部不可达时，`hosts` 无解，程序会保留原配置并明确诊断。
 - **网络配置**：浏览器「安全 DNS / DoH」、系统或浏览器代理、VPN、IPv6 优先、网关强制 DNS 劫持都可能绕过 `hosts`；校园网与企业网策略差异较大，以本机验证为准。
 - **运行条件**：关机或无交互式登录会话时不运行；睡眠期间暂停，唤醒后靠任务补跑（会看到「心跳过期」后自动恢复，属预期）。每小时重启上限为 3 次，超限只告警。
-- **覆盖范围**：仅配置中的 7 个 GitHub 域名；不含 SSH（`git@github.com:22`）、IPv6、`objects.githubusercontent.com`（头像 / Release 附件）。GitHub 登录态、2FA、组织 SSO 与私有仓库授权与本工具无关。
+- **覆盖范围**：配置中的 9 个 GitHub 域名，包含 `objects.githubusercontent.com` 与 `release-assets.githubusercontent.com` 两个 Release 附件 CDN 域名（直连下载附件 / 头像，使用内置 Fastly 候选池、不走 DoH）；不含 SSH（`git@github.com:22`）与 IPv6。GitHub 登录态、2FA、组织 SSO 与私有仓库授权与本工具无关。
 - **安全**：计划任务以最高权限运行本目录下的脚本，请确保脚本目录权限受控，防止被篡改后借道提权。仅使用程序内置来源并逐个验证的 IP，请勿混用来源不明的「hosts 一键包」。
 - **合规**：仅用于改善对 GitHub 等合法站点的访问体验，请遵守所在单位的网络使用规定与相关法律法规。
 
@@ -144,6 +145,7 @@ Editing `hosts` once only works for a few days — GitHub becomes unreachable ag
 | `config.example.json` | Reference template identical to the defaults, for restoring them |
 | `run-as-admin.bat` | One-click launcher: UAC → register both scheduled tasks → hand over to the windowless daemon |
 | `open-github.bat` | **Only manual entry**: double-click to open GitHub in your default browser; no background flow calls it |
+| `quick-connect.bat` | One-click direct connect: triggers one background watchdog check, then opens GitHub; the desktop shortcut is a byte-identical copy of this file |
 | `README.md` | This file (bilingual: quick start, troubleshooting, code map) |
 | `docs/PREREQUISITES.md` | Prerequisites (system, privileges, network, session) |
 | `docs/CONFIGURATION.md` | Configuration reference: every key, default, and tuning advice |
@@ -214,7 +216,7 @@ Please open an Issue with your `--status` output and the relevant lines from `gi
 - **Limits**: only DNS-resolution issues are addressed. Full TLS/SNI interference, or total loss of both DoH and the candidate pool, cannot be fixed by `hosts`; the program preserves the existing configuration and reports a clear diagnosis.
 - **Network setup**: browser "Secure DNS / DoH", system or browser proxies, VPNs, IPv6 preference, and gateway-enforced DNS hijacking can bypass `hosts`. Campus and corporate networks vary widely — verify on the target machine.
 - **Runtime conditions**: does not run while powered off or without an interactive logon session; paused during sleep and caught up after wake (a "heartbeat expired" message followed by automatic recovery is expected). Restart cap is 3 per hour; exceeding it only raises an alert.
-- **Coverage**: only the 7 GitHub domains in the configuration; excludes SSH (`git@github.com:22`), IPv6, and `objects.githubusercontent.com` (avatars / release assets). GitHub login state, 2FA, organization SSO, and private-repo authorization are unrelated to this tool.
+- **Coverage**: all 9 GitHub domains in the configuration, including `objects.githubusercontent.com` and `release-assets.githubusercontent.com` for direct release-asset / avatar downloads (these two use the built-in Fastly candidate pool instead of DoH); excludes SSH (`git@github.com:22`) and IPv6. GitHub login state, 2FA, organization SSO, and private-repo authorization are unrelated to this tool.
 - **Security**: the scheduled task runs the script in this directory with highest privileges — keep the directory ACLs controlled so a tampered script cannot be used for privilege escalation. Only IPs from built-in sources, each individually validated, are used; do not mix in untrusted "hosts one-click packs".
 - **Compliance**: intended solely to improve access to legitimate sites such as GitHub. Observe your organization's network policies and applicable laws and regulations.
 

@@ -1,8 +1,8 @@
 {
   "_comment": "GitHub Hosts Keeper 配置。修改后立即生效（守护进程每轮热加载），无需重启。网页仅由手动入口 --open / open-github.bat 打开；自动流程绝不启动浏览器。",
 
-  "interval_min_minutes": 20,
-  "interval_max_minutes": 45,
+  "interval_min_minutes": 10,
+  "interval_max_minutes": 25,
   "failure_retry_minutes": 10,
   "jitter_ratio": 0.2,
 
@@ -23,7 +23,9 @@
     "raw.githubusercontent.com",
     "gist.githubusercontent.com",
     "gist.github.com",
-    "github.global.ssl.fastly.net"
+    "github.global.ssl.fastly.net",
+    "objects.githubusercontent.com",
+    "release-assets.githubusercontent.com"
   ],
   "doh_endpoints": [
     "https://dns.alidns.com/resolve?name={domain}&type=A",
@@ -49,7 +51,7 @@
 
   "watchdog_enabled": true,
   "watchdog_task_name": "GitHubHostsKeeper-Watchdog",
-  "watchdog_interval_minutes": 5,
+  "watchdog_interval_minutes": 2,
   "heartbeat_path": "heartbeat.json",
   "heartbeat_interval_seconds": 30,
   "heartbeat_timeout_seconds": 120,
@@ -61,6 +63,6 @@
 
   "health_check_enabled": true,
   "health_check_timeout_seconds": 10,
-  "health_fail_threshold": 3,
-  "health_trigger_cooldown_minutes": 10
+  "health_fail_threshold": 2,
+  "health_trigger_cooldown_minutes": 3
 }

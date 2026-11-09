@@ -28,7 +28,7 @@
 | 重试 / Retries | `retry_backoff_seconds` | `2` | 线性退避基数（秒） / Linear backoff base (s) |
 | 探测 / Discovery | `max_candidates_per_domain` | `14` | 每域名最多探测的候选 IP 数 / Max candidate IPs probed per domain |
 | 探测 / Discovery | `probe_workers` | `12` | 并发探测线程数 / Concurrent probe workers |
-| 探测 / Discovery | `domains` | 7 个域名 | 需要维护的 GitHub 域名列表 / GitHub domains to maintain: `github.com`, `api.github.com`, `codeload.github.com`, `raw.githubusercontent.com`, `gist.githubusercontent.com`, `gist.github.com`, `github.global.ssl.fastly.net` |
+| 探测 / Discovery | `domains` | 9 个域名 | 需要维护的 GitHub 域名列表 / GitHub domains to maintain: `github.com`, `api.github.com`, `codeload.github.com`, `raw.githubusercontent.com`, `gist.githubusercontent.com`, `gist.github.com`, `github.global.ssl.fastly.net`, `objects.githubusercontent.com`, `release-assets.githubusercontent.com`（后两项走内置 Fastly 候选池，不做 DoH 查询） |
 | 探测 / Discovery | `doh_endpoints` | 3 个端点 | DoH 查询模板（含 `{domain}` 占位符） / DoH query templates with a `{domain}` placeholder: Alibaba, Cloudflare, Tencent |
 | 保护 / Safety | `min_valid_records` | `2` | 有效记录少于该值则完全不改动 `hosts` / If fewer valid records exist, `hosts` is left untouched |
 | 验证 / Verification | `verify_url` | `https://github.com` | 写入后的 HTTPS 验证地址，也是手动入口打开的地址 / URL for post-write HTTPS verification and for the manual open entry |

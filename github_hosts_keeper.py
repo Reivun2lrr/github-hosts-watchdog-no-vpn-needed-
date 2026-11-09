@@ -161,7 +161,16 @@ SEEDS = {
                                    "185.199.110.133", "185.199.111.133"],
     "github.global.ssl.fastly.net": ["151.101.1.194", "151.101.65.194",
                                      "151.101.129.194", "151.101.193.194", "199.232.69.194"],
+    "objects.githubusercontent.com": ["185.199.108.133", "185.199.109.133",
+                                       "185.199.110.133", "185.199.111.133"],
+    "release-assets.githubusercontent.com": ["185.199.108.133", "185.199.109.133",
+                                              "185.199.110.133", "185.199.111.133"],
 }
+
+# Release 附件 CDN 走固定 Fastly 段: 实测 DoH 会返回超时 IP, 且这两项无需 DNS 解析。
+# 直接探测内置候选池更快也更可靠(仍逐个做 TLS 证书校验 + 正文读取)。
+SEED_ONLY_DOMAINS = {"objects.githubusercontent.com",
+                     "release-assets.githubusercontent.com"}
 
 # 探测/巡检必须真正收到响应正文才算可用。只读响应头会把「头通但正文传不下来」
 # 的 IP 误判为最快(表现为浏览器打不开页面、curl 完整下载 0 字节超时)。
@@ -169,7 +178,9 @@ SEEDS = {
 # 因此探测改为读完整页, 并优先采用能读满正文的 IP。
 PROBE_BODY_LIMIT = 600000
 FULL_PAGE_MIN_BYTES = 500000
-CHECK_BODY_LIMIT = 262144
+# 访问巡检必须与探测口径一致: 只读 256 KB 会把「头通、正文卡住」的失效 IP 判为可用,
+# 表现为 state.json=success 但浏览器打不开。改为读满整页并校验字节数。
+CHECK_BODY_LIMIT = 600000
 
 log = logging.getLogger("ghk")
 _stop = threading.Event()
@@ -419,12 +430,15 @@ def discover(cfg) -> tuple[dict, dict]:
     records = {}
     cap = int(cfg["max_candidates_per_domain"])
     for domain in cfg["domains"]:
-        def query_or_raise(d=domain):
-            r = doh_query(d, cfg)
-            if not r:
-                raise RuntimeError("所有 DoH 端点均无响应")
-            return r
-        ips, _ = with_retries(query_or_raise, cfg, f"DoH-{domain}")
+        if domain in SEED_ONLY_DOMAINS:
+            ips = []                      # 固定 CDN 段: 跳过被污染的 DoH 查询
+        else:
+            def query_or_raise(d=domain):
+                r = doh_query(d, cfg)
+                if not r:
+                    raise RuntimeError("所有 DoH 端点均无响应")
+                return r
+            ips, _ = with_retries(query_or_raise, cfg, f"DoH-{domain}")
         candidates = []
         for ip in (ips or []) + SEEDS.get(domain, []):
             if ip not in candidates and public_ipv4(ip):
@@ -446,7 +460,7 @@ def discover(cfg) -> tuple[dict, dict]:
         ok.sort(key=rank, reverse=True)
         diagnostics[domain] = {"tested": len(candidates), "reachable": len(ok),
                                "full_page": bool(ok and ok[0]["body_bytes"] >= FULL_PAGE_MIN_BYTES),
-                               "doh": (ips or [])[:4]}
+                               "doh": ["seed-only"] if domain in SEED_ONLY_DOMAINS else (ips or [])[:4]}
         if ok:
             records[domain] = ok[0]["ip"]
             log.info("%-32s -> %-16s (%sms, HTTP %s)", domain, ok[0]["ip"],
@@ -629,9 +643,13 @@ def check_https(cfg, full_download: bool = False) -> dict:
         with opener.open(req, timeout=float(cfg["http_timeout_seconds"])) as r:
             status = r.status
             if full_download:
-                r.read(CHECK_BODY_LIMIT)
+                body = r.read(CHECK_BODY_LIMIT)
                 elapsed = time.time() - t0
                 limit = float(cfg["health_check_timeout_seconds"])
+                if len(body) < FULL_PAGE_MIN_BYTES:
+                    return {"ok": False, "method": "https",
+                            "reason": f"页面正文不完整({len(body)}B < {FULL_PAGE_MIN_BYTES}B)",
+                            "detail": "疑似头通正文不通的失效 IP", "elapsed": round(elapsed, 3)}
                 if elapsed > limit:
                     return {"ok": False, "method": "https",
                             "reason": f"页面加载缓慢({elapsed:.1f}s > {limit:.0f}s)",
@@ -899,11 +917,11 @@ def access_check(cfg, wd: dict, hb: dict | None) -> dict:
         h["last_reason"] = "健康检查已禁用"
         wd["health"] = h
         return wd
+    # 旧逻辑在 supervisor 忙时整轮跳过, worker 长时间运行时形成检查空窗,
+    # 表现为「进入 GitHub 一段时间后断连却迟迟不恢复」。现在忙时照样检查并累计失败,
+    # 只是不触发重启, 等 supervisor 空闲后的下一轮即可立即恢复。
     state = (hb or {}).get("state")
-    if state != "idle":
-        h["last_reason"] = f"supervisor 非空闲(state={state}), 本轮跳过访问检查"
-        wd["health"] = h
-        return wd
+    busy = state != "idle"
 
     probe_cfg = dict(cfg, http_timeout_seconds=min(
         float(cfg["health_check_timeout_seconds"]), float(cfg["http_timeout_seconds"])))
@@ -916,6 +934,8 @@ def access_check(cfg, wd: dict, hb: dict | None) -> dict:
         h["last_success"] = now()
     else:
         h["consecutive_failures"] = int(h.get("consecutive_failures", 0)) + 1
+    if busy:
+        h["last_reason"] += f" (supervisor 忙 state={state}, 本轮只累计不重启)"
 
     last = h.get("last_trigger_at")
     if last:
@@ -929,7 +949,7 @@ def access_check(cfg, wd: dict, hb: dict | None) -> dict:
         except Exception:
             pass
 
-    if int(h["consecutive_failures"]) >= int(cfg["health_fail_threshold"]):
+    if not busy and int(h["consecutive_failures"]) >= int(cfg["health_fail_threshold"]):
         h["trigger"] = True
         h["last_trigger_at"] = now()
         h["total_triggers"] = int(h.get("total_triggers", 0)) + 1

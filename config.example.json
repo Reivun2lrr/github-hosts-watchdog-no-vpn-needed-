@@ -1,14 +1,14 @@
 {
   "_comment": "GitHub Hosts Watchdog 默认配置模板 / Default configuration template. Hot-reloaded every cycle; copy to config.json to use. Full reference: docs/CONFIGURATION.md. Web pages are never opened automatically; use --open or open-github.bat manually.",
 
-  "interval_min_minutes": 45,
-  "interval_max_minutes": 120,
+  "interval_min_minutes": 20,
+  "interval_max_minutes": 60,
   "failure_retry_minutes": 10,
   "jitter_ratio": 0.2,
 
   "dns_timeout_seconds": 6,
   "connect_timeout_seconds": 4,
-  "http_timeout_seconds": 8,
+  "http_timeout_seconds": 12,
   "edge_verify_timeout_seconds": 45,
   "flushdns_timeout_seconds": 15,
   "max_retries": 3,
@@ -23,7 +23,9 @@
     "raw.githubusercontent.com",
     "gist.githubusercontent.com",
     "gist.github.com",
-    "github.global.ssl.fastly.net"
+    "github.global.ssl.fastly.net",
+    "objects.githubusercontent.com",
+    "release-assets.githubusercontent.com"
   ],
   "doh_endpoints": [
     "https://dns.alidns.com/resolve?name={domain}&type=A",
@@ -49,7 +51,7 @@
 
   "watchdog_enabled": true,
   "watchdog_task_name": "GitHubHostsKeeper-Watchdog",
-  "watchdog_interval_minutes": 5,
+  "watchdog_interval_minutes": 2,
   "heartbeat_path": "heartbeat.json",
   "heartbeat_interval_seconds": 30,
   "heartbeat_timeout_seconds": 120,
@@ -60,7 +62,7 @@
   "task_command_timeout_seconds": 40,
 
   "health_check_enabled": true,
-  "health_check_timeout_seconds": 8,
+  "health_check_timeout_seconds": 10,
   "health_fail_threshold": 2,
-  "health_trigger_cooldown_minutes": 15
+  "health_trigger_cooldown_minutes": 3
 }
