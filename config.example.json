@@ -73,6 +73,6 @@
     "hotpath_fail_threshold": 1,
     "hotpath_switch_cooldown_ms": 5000,
     "hotpath_pool_refresh_ms": 3000,
-    "hotpath_pool_size": 8,
+    "hotpath_pool_size": 12,
     "hotpath_pool_path": "ip_pool.json"
 }

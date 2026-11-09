@@ -34,7 +34,7 @@
 | 热路径 / Hot Path | `hotpath_interval_ms` | `500` | 当前 IP 检测间隔（毫秒） / Current-IP check interval (ms) |
 | 热路径 / Hot Path | `hotpath_probe_timeout_ms` / `hotpath_connect_timeout_ms` | `900` / `400` | 单次探测总超时 / TCP 快速判死超时（毫秒） / Total probe timeout / fast TCP connect timeout (ms) |
 | 热路径 / Hot Path | `hotpath_fail_threshold` / `hotpath_switch_cooldown_ms` | `1` / `5000` | 触发切换的连续失败次数 / 切换后观察期（毫秒，抑制来回抖动） / Failures before switch / post-switch observation window (ms, dampens flapping) |
-| 热路径 / Hot Path | `hotpath_pool_refresh_ms` / `hotpath_pool_size` / `hotpath_backoff_ms` | `3000` / `8` / `2000` | 池刷新间隔 / 池容量 / 全阻断退避（毫秒） / Pool refresh / size / all-blocked backoff (ms) |
+| 热路径 / Hot Path | `hotpath_pool_refresh_ms` / `hotpath_pool_size` / `hotpath_backoff_ms` | `3000` / `12` / `2000` | 池刷新间隔 / 池容量 / 全阻断退避（毫秒） / Pool refresh / size / all-blocked backoff (ms) |
 | 热路径 / Hot Path | `hotpath_pool_path` | `ip_pool.json` | IP 池运行时状态文件，不纳入版本控制 / Runtime pool state file, not version-controlled |
 | 保护 / Safety | `min_valid_records` | `2` | 有效记录少于该值则完全不改动 `hosts` / If fewer valid records exist, `hosts` is left untouched |
 | 验证 / Verification | `verify_url` | `https://github.com` | 写入后的 HTTPS 验证地址，也是手动入口打开的地址 / URL for post-write HTTPS verification and for the manual open entry |

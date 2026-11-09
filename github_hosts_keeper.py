@@ -157,7 +157,7 @@ DEFAULTS = {
     "hotpath_fail_threshold": 1,
     "hotpath_switch_cooldown_ms": 5000,
     "hotpath_pool_refresh_ms": 3000,
-    "hotpath_pool_size": 8,
+    "hotpath_pool_size": 12,
     "hotpath_pool_path": "ip_pool.json",
 }
 
@@ -784,11 +784,10 @@ def current_host_ip(domain: str = "github.com") -> str | None:
     return None
 
 
-def best_pool_ip(cfg, pool: dict, exclude: str | None) -> str | None:
-    """选延迟最低的备用 IP。
+def ranked_pool_ips(cfg, pool: dict, exclude: str | None, limit: int = 3) -> list[str]:
+    """按「失败次数少、RTT 低」排出候选; 近期成功过才保留资格。
 
-    近期成功过即保留候选资格(间歇阻断时池不能一轮失败就判空); 排除当前 IP 与
-    10 秒内刚切离的 IP, 配合切换冷却抑制在两个 IP 之间来回抖动。
+    排除当前 IP 与 10 秒内刚切离的 IP, 抑制在两个 IP 之间来回抖动。
     """
     ts = time.time()
     recent = pool.get("last_switch") or {}
@@ -807,7 +806,13 @@ def best_pool_ip(cfg, pool: dict, exclude: str | None) -> str | None:
             continue
         ranked.append((e.get("fail", 0), rtt, ip))
     ranked.sort(key=lambda x: (x[0], x[1]))
-    return ranked[0][2] if ranked else None
+    return [x[2] for x in ranked[:limit]]
+
+
+def best_pool_ip(cfg, pool: dict, exclude: str | None) -> str | None:
+    """兼容入口: 返回排序第一的候选。"""
+    picks = ranked_pool_ips(cfg, pool, exclude, limit=1)
+    return picks[0] if picks else None
 
 
 def switch_domain_ip(cfg, domain: str, new_ip: str) -> dict:
@@ -865,6 +870,37 @@ def switch_domain_ip(cfg, domain: str, new_ip: str) -> dict:
                 "elapsed_ms": round((time.perf_counter() - t0) * 1000, 1)}
 
 
+def verify_and_switch(cfg, pool: dict, domain: str, cur: str | None,
+                      reason: str | None, timeout_ms: int, connect_ms: int) -> dict:
+    """切换前逐个实时验证候选, 成功才写 hosts。
+
+    旧逻辑只看「池里 5 分钟内成功过」, 网络层整体阻断时会反复切到已失效的陈旧 IP,
+    表现为一小时上百次无效切换。现在候选必须此刻通过 TLS + 正文探测; 全部失败即
+    判定整体阻断, 不切换、退避等待, 同时对验证失败的候选快速降权。
+    """
+    if CYCLE_RUNNING.is_set():
+        return {"ok": False, "reason": "worker 运行中, 暂缓切换", "tried": []}
+    picks = ranked_pool_ips(cfg, pool, cur, limit=3)
+    tried = []
+    for pick in picks:
+        vr = micro_probe(domain, pick, timeout_ms, connect_ms)
+        tried.append({"ip": pick, "ok": vr["ok"], "rtt_ms": vr["rtt_ms"]})
+        if not vr["ok"]:
+            e = pool["entries"].setdefault(pick, {"ok": 0, "fail": 0, "rtt_ms": None})
+            e["fail"] = int(e.get("fail", 0)) + 3
+            continue
+        sw = switch_domain_ip(cfg, domain, pick)
+        if sw.get("ok"):
+            pool["active_ip"] = pick
+            pool["switches"] = int(pool.get("switches", 0)) + 1
+            pool["last_switch"] = {"at": now(), "epoch": time.time(),
+                                   "from": cur, "to": pick, "reason": reason, **sw}
+            return {"ok": True, "from": cur, "to": pick, "tried": tried, "details": sw}
+    return {"ok": False, "tried": tried,
+            "reason": "所有候选实时验证失败(网络层整体阻断)" if picks else "池中暂无可用备用 IP",
+            "no_candidates": not picks}
+
+
 def hotpath_once(cfg) -> int:
     """单次热路径检测(验证/手动触发用); 输出 JSON 指标, 绝不打开网页。"""
     domain, t0 = "github.com", time.perf_counter()
@@ -879,14 +915,8 @@ def hotpath_once(cfg) -> int:
            "pool": [{"ip": r["ip"], "ok": r["ok"], "rtt_ms": r["rtt_ms"]} for r in results],
            "switched": None, "elapsed_ms": None}
     if not probe["ok"]:
-        pick = best_pool_ip(cfg, pool, cur)
-        if pick and not CYCLE_RUNNING.is_set():
-            out["switched"] = switch_domain_ip(cfg, domain, pick)
-            if out["switched"]["ok"]:
-                pool["active_ip"] = pick
-                pool["switches"] = int(pool.get("switches", 0)) + 1
-        elif not pick:
-            out["switched"] = {"ok": False, "reason": "池中暂无可用备用 IP"}
+        out["switched"] = verify_and_switch(cfg, pool, domain, cur,
+                                            probe.get("reason"), timeout_ms, connect_ms)
     save_ip_pool(cfg, pool)
     out["elapsed_ms"] = round((time.perf_counter() - t0) * 1000, 1)
     print(json.dumps(out, ensure_ascii=False, indent=2))
@@ -925,33 +955,25 @@ def hotpath_loop(cfg, stop_event: threading.Event, domain: str = "github.com"):
                 failures += 1
                 busy, cooling = CYCLE_RUNNING.is_set(), time.perf_counter() - last_switch < cooldown
                 if failures >= threshold and not busy and not cooling:
-                    pick = best_pool_ip(cfg, pool, cur)
-                    if pick:
-                        old, sw = cur, switch_domain_ip(cfg, domain, pick)
-                        if sw.get("ok"):
-                            last_switch = time.perf_counter()
-                            failures = 0
-                            pool["active_ip"] = pick
-                            pool["switches"] = int(pool.get("switches", 0)) + 1
-                            pool["last_switch"] = {"at": now(), "epoch": time.time(),
-                                                   "from": old, "to": pick,
-                                                   "reason": r.get("reason"), **sw}
-                            save_ip_pool(cfg, pool)
-                            log.info("热路径切换 %s -> %s 耗时 %.1fms (DNS %.2fms, 原因: %s)",
-                                     old, pick, sw["elapsed_ms"], sw.get("dns_ms", -1),
-                                     r.get("reason"))
-                        else:
-                            degraded = True
-                            log.warning("热路径切换失败: %s", sw.get("reason"))
+                    res = verify_and_switch(cfg, pool, domain, cur,
+                                            r.get("reason"), timeout_ms, connect_ms)
+                    if res["ok"]:
+                        last_switch = time.perf_counter()
+                        failures = 0
+                        save_ip_pool(cfg, pool)
+                        sw = res["details"]
+                        log.info("热路径切换 %s -> %s 耗时 %.1fms (DNS %.2fms, 实时验证 %d 个候选, 原因: %s)",
+                                 cur, res["to"], sw["elapsed_ms"], sw.get("dns_ms", -1),
+                                 len(res["tried"]), r.get("reason"))
                     else:
-                        # 所有候选 IP 同时不可达 = 网络层整体阻断, 本机无法自愈;
-                        # 退避并节流日志, 避免无效连接风暴与日志刷屏。
+                        # 候选此刻全部不通 = 网络层整体阻断, 本机无法自愈;
+                        # 不写 hosts, 退避并节流日志, 杜绝无效切换。
                         degraded = True
+                        save_ip_pool(cfg, pool)
                         if time.perf_counter() - last_warn >= 10:
                             last_warn = time.perf_counter()
-                            log.warning("热路径: 当前 IP 不可用且池中无可用备用 IP (%s); "
-                                        "属网络层整体阻断, 退避至 %sms 等待链路恢复",
-                                        r.get("reason"), cfg["hotpath_backoff_ms"])
+                            log.warning("热路径: %s (%s), 未改 hosts; 退避至 %sms 等待链路恢复",
+                                        res["reason"], r.get("reason"), cfg["hotpath_backoff_ms"])
         except Exception as e:                         # noqa: BLE001 - 热路径不能拖垮 supervisor
             degraded = True
             log.warning("热路径单轮异常: %s: %s", type(e).__name__, e)
