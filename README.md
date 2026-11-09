@@ -21,9 +21,9 @@
 
 | 项 | 值 |
 |---|---|
-| 最新版本 | `v1.0.2` — 热路径自愈与连接稳定性迭代（2026-11-09） |
-| 下载 | [Releases Latest](https://github.com/Reivun2lrr/github-hosts-watchdog-no-vpn-needed-/releases/latest) → `github-hosts-watchdog-v1.0.2.zip`，含 11 个文件，解压即用 |
-| 上一版本 | `v1.0.1` 保留为回退版；`v1.0.0` 为初始版 |
+| 最新版本 | `v1.0.3` — 文档与可发现性迭代（2026-11-09） |
+| 下载 | [Releases Latest](https://github.com/Reivun2lrr/github-hosts-watchdog-no-vpn-needed-/releases/latest) → `github-hosts-watchdog-v1.0.3.zip`，含 12 个文件，解压即用 |
+| 上一版本 | `v1.0.2` 代码相同、文档为上一版；`v1.0.1` 及更早为回退版 |
 | 源码 | `main` 分支 · MIT 许可 · 仅 Python 3 标准库，无第三方依赖 |
 
 > 请走 Latest 链接下载：`v1.0.1` 附件是改进前的旧架构，不含热路径、两个附件 CDN 域名与一键直连工具。
@@ -221,9 +221,9 @@ Editing `hosts` once only works for a few days — GitHub becomes unreachable ag
 
 | Item | Value |
 |---|---|
-| Latest | `v1.0.2` — hot-path failover and connection stability iteration (2026-11-09) |
-| Download | [Releases Latest](https://github.com/Reivun2lrr/github-hosts-watchdog-no-vpn-needed-/releases/latest) -> `github-hosts-watchdog-v1.0.2.zip`, 11 files, extract and run |
-| Previous | `v1.0.1` is kept as the rollback version; `v1.0.0` is the initial release |
+| Latest | `v1.0.3` — docs and discoverability iteration (2026-11-09) |
+| Download | [Releases Latest](https://github.com/Reivun2lrr/github-hosts-watchdog-no-vpn-needed-/releases/latest) -> `github-hosts-watchdog-v1.0.3.zip`, 12 files, extract and run |
+| Previous | `v1.0.2` has the same code with earlier docs; `v1.0.1` and older are rollback versions |
 | Source | `main` branch, MIT licensed, Python 3 standard library only, no third-party packages |
 
 > Always use the Latest link: the `v1.0.1` asset predates the hot path, the two asset-CDN domains, and the one-click connect tool.
