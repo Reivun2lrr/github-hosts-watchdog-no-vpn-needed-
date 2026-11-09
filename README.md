@@ -11,6 +11,10 @@
 
 一次改 `hosts` 只能管用几天，IP 一失效又打不开 GitHub。**GitHub Hosts Watchdog** 是一套面向 Windows 的自动化访问自愈系统：定时从多个 DoH 源发现可用 IP，经 TLS 证书校验与 HTTPS 探测确认后安全写入 `hosts`，再由双层看门狗与访问健康巡检，让进程崩溃、系统睡眠唤醒、IP 在成功轮次之间失效等情况都能自动恢复。一次部署，长期免维护。
 
+**适合谁**：国内网络下的 Windows 10 / 11 用户，需要长期稳定使用 `github.com`、`git clone` 与 raw 资源，且不想依赖代理。
+**要做什么**：只需双击一次 `run-as-admin.bat`；之后 IP 失效、进程崩溃、睡眠唤醒都自动恢复，无需日常维护。
+**如果这个工具帮你省了时间，欢迎点一个 Star**，让同样被 GitHub 访问折磨的人更容易找到它。
+
 > 范围说明：本工具解决 **DNS 解析层面**的访问问题。若网络对全部 GitHub IP 实施 TLS/SNI 层干扰，`hosts` 方案无法恢复网页访问，程序会明确诊断而不是伪装成功。详见「注意事项」。
 
 ### 核心功能
@@ -33,13 +37,26 @@
 | `config.example.json` | 与默认配置一致的对照模板，用于改坏后恢复默认值 |
 | `run-as-admin.bat` | 一键启动器：申请 UAC → 注册两个计划任务 → 交由无窗口守护进程接管 |
 | `open-github.bat` | **唯一手动入口**：双击才用默认浏览器打开 GitHub；任何后台流程都不会调用它 |
-| `README.md` | 本文件（中英双语） |
+| `README.md` | 本文件（中英双语，含快速开始、常见问题与代码结构导览） |
 | `docs/PREREQUISITES.md` | 使用前提（系统、权限、网络、会话） |
 | `docs/CONFIGURATION.md` | 配置要求：全部配置项、默认值与调优建议 |
 | `LICENSE` | MIT 许可证 |
 | `.gitignore` | 排除运行时产物与本机数据 |
 
 运行时产物 `state.json`、`heartbeat.json`、`github_hosts_keeper.log`、`backups/` 由程序自动生成，不纳入版本控制。
+
+### 代码结构导览
+
+主程序是单文件、仅使用 Python 标准库。按现有函数分为四组，方便定位与审阅：
+
+| 分组 | 代表函数 |
+|---|---|
+| IP 发现与探测 | `doh_query`、`public_ipv4`、`probe`、`discover` |
+| `hosts` 事务与安全 | `decode_hosts`、`rebuild_hosts`、`backup_hosts`、`write_hosts_bytes`、`rollback`、`apply_hosts`、`flush_dns` |
+| 自愈与状态 | `run_cycle`、`verify`、`access_check`、`run_watchdog`、`run_daemon`、`write_heartbeat`、`pid_alive` |
+| 命令行与安装 | `install_task`、`uninstall_task`、`show_status`、`do_rollback`、`open_github_page`、`main` |
+
+自检入口（均无需额外依赖）：`--help` 列出全部命令；`--dry-run` 只探测不写文件；`--status` 只读查看状态；`--rollback` 还原最近一次 `hosts` 备份。
 
 ### 使用前提（摘要）
 
@@ -51,13 +68,39 @@ Windows 10 / 11；Python 3.x（**无需第三方库**）；首次运行需批准
 
 ### 快速开始
 
-1. 确认已安装 Python 3，将本目录放到一个稳定的本地路径。
-2. 双击 `run-as-admin.bat`，在 UAC 弹窗点击「是」。脚本自动注册计划任务并完成守护交接，**之后无需保留任何控制台窗口**。
-3. 执行 `py -3 github_hosts_keeper.py --status` 查看运行状态；程序会自动完成 IP 探测、`hosts` 写入与 DNS 刷新。
+1. 确认已安装 Python 3，把本目录放到一个稳定的本地路径。
+2. 双击 `run-as-admin.bat`，在 UAC 弹窗点「是」。
+3. 查看状态：
+
+```bat
+py -3 github_hosts_keeper.py --status
+```
+
+脚本自动注册计划任务并完成守护交接，**之后无需保留任何控制台窗口**；IP 探测、`hosts` 写入与 DNS 刷新都由程序完成。仅使用 Python 标准库，无需安装任何依赖。
 
 ### 验证
 
-`--status` 中「supervisor 健康: 是」且 `result: success` 表示当前可用；`--dry-run` 只探测不写任何文件，可用于安装前自检；`--rollback` 可还原最近一次 `hosts` 备份。
+```bat
+py -3 github_hosts_keeper.py --dry-run
+py -3 github_hosts_keeper.py --status
+```
+
+`--dry-run` 只探测、不写任何文件，可用于安装前自检；`--status` 中「supervisor 健康: 是」且 `result: success` 表示当前可用；`--rollback` 可还原最近一次 `hosts` 备份。全部命令见 `py -3 github_hosts_keeper.py --help`。
+
+### 常见问题 / Troubleshooting
+
+| 现象 | 怎么处理 |
+|---|---|
+| 首次运行弹出 UAC | 点「是」。用于注册计划任务和写入 `hosts`；之后后台运行不再弹窗。 |
+| 出现蓝色权限窗口或控制台一闪而过 | 当前版本已统一隐藏派生进程窗口。若仍出现，确认运行的是本目录当前版本，再执行一次 `run-as-admin.bat`。 |
+| 突然又打不开 GitHub | 执行 `py -3 github_hosts_keeper.py --once` 立即触发一轮重探测；访问健康巡检也会在连续失败后自动触发。 |
+| 日志里出现「心跳过期」后自动恢复 | 睡眠唤醒后的补跑，属预期行为，无需干预。 |
+| 改了 `config.json` 没生效 | 配置每轮热加载、无需重启；用 `--once` 立即跑一轮确认。 |
+| 想手动打开 GitHub 网页 | 双击 `open-github.bat`，或执行 `py -3 github_hosts_keeper.py --open`。后台流程不会自动打开网页。 |
+| 想还原被改动的 `hosts` | 执行 `py -3 github_hosts_keeper.py --rollback`。 |
+| `hosts` 改了但浏览器仍打不开 | 先看下面「注意事项」的能力边界与网络配置：浏览器 DoH、系统代理、IPv6 优先都会绕过 `hosts`。 |
+
+遇到问题请开 Issue，并附上 `--status` 输出与 `github_hosts_keeper.log` 中的相关片段。
 
 ### 注意事项
 
@@ -74,6 +117,10 @@ Windows 10 / 11；Python 3.x（**无需第三方库**）；首次运行需批准
 ## English
 
 Editing `hosts` once only works for a few days — GitHub becomes unreachable again as soon as the IP changes. **GitHub Hosts Watchdog** is a self-healing access system for Windows: it periodically discovers usable IPs from multiple DoH sources, validates them with TLS certificate checks and HTTPS probes, safely writes them to `hosts`, and relies on a two-layer watchdog plus access-health checks to recover automatically from process crashes, sleep/wake cycles, and IPs that expire between successful refresh cycles. Deploy once, maintain nothing.
+
+**For**: Windows 10 / 11 users on networks where GitHub access breaks intermittently, who need `github.com`, `git clone`, and raw assets to keep working without a proxy.
+**What you do**: double-click `run-as-admin.bat` once. IP expiry, process crashes, and sleep/wake recovery are handled automatically from then on.
+**If this saved you time, a Star helps others hitting the same GitHub access problem find it.**
 
 > Scope: this tool solves access problems at the **DNS resolution** layer. If a network applies TLS/SNI-level interference to every GitHub IP, editing `hosts` cannot restore web access; the program reports this explicitly instead of pretending to succeed. See "Notes".
 
@@ -96,13 +143,27 @@ Editing `hosts` once only works for a few days — GitHub becomes unreachable ag
 | `config.json` | Shipped default configuration, usable as-is or editable |
 | `config.example.json` | Reference template identical to the defaults, for restoring them |
 | `run-as-admin.bat` | One-click launcher: UAC → register both scheduled tasks → hand over to the windowless daemon |
-| `README.md` | This file (bilingual: Chinese / English) |
+| `open-github.bat` | **Only manual entry**: double-click to open GitHub in your default browser; no background flow calls it |
+| `README.md` | This file (bilingual: quick start, troubleshooting, code map) |
 | `docs/PREREQUISITES.md` | Prerequisites (system, privileges, network, session) |
 | `docs/CONFIGURATION.md` | Configuration reference: every key, default, and tuning advice |
 | `LICENSE` | MIT License |
 | `.gitignore` | Excludes runtime artifacts and local data |
 
 Runtime artifacts `state.json`, `heartbeat.json`, `github_hosts_keeper.log`, and `backups/` are generated automatically and are not version-controlled.
+
+### Code Map
+
+The main program is a single file using only the Python standard library. Its existing functions fall into four groups, useful for locating code and reviewing changes:
+
+| Group | Representative functions |
+|---|---|
+| IP discovery and probing | `doh_query`, `public_ipv4`, `probe`, `discover` |
+| `hosts` transaction and safety | `decode_hosts`, `rebuild_hosts`, `backup_hosts`, `write_hosts_bytes`, `rollback`, `apply_hosts`, `flush_dns` |
+| Self-healing and state | `run_cycle`, `verify`, `access_check`, `run_watchdog`, `run_daemon`, `write_heartbeat`, `pid_alive` |
+| CLI and installation | `install_task`, `uninstall_task`, `show_status`, `do_rollback`, `open_github_page`, `main` |
+
+Self-check entry points (no extra dependencies): `--help` lists every command; `--dry-run` probes without writing; `--status` is read-only; `--rollback` restores the most recent `hosts` backup.
 
 ### Prerequisites (summary)
 
@@ -115,12 +176,38 @@ All behavior lives in `config.json` and is hot-reloaded each cycle, so changes n
 ### Quick Start
 
 1. Confirm Python 3 is installed and place this directory at a stable local path.
-2. Double-click `run-as-admin.bat` and click "Yes" in the UAC prompt. The script registers the scheduled tasks and hands over to the daemon — **no console window needs to stay open afterwards**.
-3. Run `py -3 github_hosts_keeper.py --status` to inspect status; the program handles IP discovery, `hosts` writing, and DNS flushing automatically.
+2. Double-click `run-as-admin.bat` and click "Yes" in the UAC prompt.
+3. Inspect status:
+
+```bat
+py -3 github_hosts_keeper.py --status
+```
+
+The script registers the scheduled tasks and hands over to the daemon — **no console window needs to stay open afterwards**. IP discovery, `hosts` writing, and DNS flushing are handled by the program. Standard library only; no packages to install.
 
 ### Verification
 
-In `--status`, "supervisor 健康: 是" (supervisor healthy: yes) together with `result: success` means it is currently working. `--dry-run` only probes and writes nothing, useful for a pre-install check; `--rollback` restores the most recent `hosts` backup.
+```bat
+py -3 github_hosts_keeper.py --dry-run
+py -3 github_hosts_keeper.py --status
+```
+
+`--dry-run` only probes and writes nothing, useful for a pre-install check; in `--status`, "supervisor 健康: 是" (supervisor healthy: yes) together with `result: success` means it is currently working; `--rollback` restores the most recent `hosts` backup. Every command is listed by `py -3 github_hosts_keeper.py --help`.
+
+### Troubleshooting
+
+| Symptom | What to do |
+|---|---|
+| UAC prompt on first run | Click "Yes". It registers the scheduled tasks and allows writing `hosts`; background runs do not prompt again. |
+| A blue privilege window or console flashes briefly | The current version hides all spawned process windows. If it still appears, confirm you are running the current files in this directory and run `run-as-admin.bat` once more. |
+| GitHub suddenly unreachable again | Run `py -3 github_hosts_keeper.py --once` to trigger a full rediscovery immediately; access-health checks also trigger one after consecutive failures. |
+| "Heartbeat expired" followed by automatic recovery | Expected catch-up after sleep/wake. No action needed. |
+| `config.json` changes seem ignored | Config is hot-reloaded every cycle and needs no restart; run `--once` to apply it immediately. |
+| Want to open the GitHub page manually | Double-click `open-github.bat`, or run `py -3 github_hosts_keeper.py --open`. No background flow opens a page automatically. |
+| Want to undo the `hosts` change | Run `py -3 github_hosts_keeper.py --rollback`. |
+| `hosts` changed but the browser still fails | See "Notes" below: browser DoH, system proxies, and IPv6 preference can all bypass `hosts`. |
+
+Please open an Issue with your `--status` output and the relevant lines from `github_hosts_keeper.log`.
 
 ### Notes
 
