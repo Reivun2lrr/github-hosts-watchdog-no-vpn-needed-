@@ -17,22 +17,66 @@
 
 > 范围说明：本工具解决 **DNS 解析层面**的访问问题。若网络对全部 GitHub IP 实施 TLS/SNI 层干扰，`hosts` 方案无法恢复网页访问，程序会明确诊断而不是伪装成功。详见「注意事项」。
 
+### 当前版本与下载
+
+| 项 | 值 |
+|---|---|
+| 最新版本 | `v1.0.2` — 热路径自愈与连接稳定性迭代（2026-11-09） |
+| 下载 | [Releases Latest](https://github.com/Reivun2lrr/github-hosts-watchdog-no-vpn-needed-/releases/latest) → `github-hosts-watchdog-v1.0.2.zip`，含 11 个文件，解压即用 |
+| 上一版本 | `v1.0.1` 保留为回退版；`v1.0.0` 为初始版 |
+| 源码 | `main` 分支 · MIT 许可 · 仅 Python 3 标准库，无第三方依赖 |
+
+> 请走 Latest 链接下载：`v1.0.1` 附件是改进前的旧架构，不含热路径、两个附件 CDN 域名与一键直连工具。
+
 ### 核心功能
 
 - **可信 IP 发现**：3 个 DoH 端点（阿里 / Cloudflare / 腾讯）＋ 内置候选池；每域名最多 14 个候选、12 并发。每个候选须通过 TCP 443 连接、TLS 证书校验（SNI）与 HTTPS 请求，并拒绝私有／保留地址，防止 `hosts` 投毒。
 - **安全写入事务**：仅替换受管理标记区块内的 GitHub 条目，自动清理重复与失效条目，其余 `hosts` 内容逐行原样保留；写前备份（保留 10 份）、写后字节校验、异常时字节级回滚，保留原文件编码、换行符与 ACL。有效记录少于阈值时完全不改动并提示。
 - **生效与验证**：刷新 DNS 缓存 → 核对系统解析结果 → HTTPS 访问验证。全程不启动浏览器、不显示网页；网页仅在你主动执行 `--open` 或双击 `open-github.bat` 时打开，显示时机完全由你控制。
 - **手动入口**：`open-github.bat`（双击）或 `py -3 github_hosts_keeper.py --open`，用默认浏览器打开 `https://github.com`。后台任务、自启、看门狗一律不调用它。
-- **双层看门狗**：内部 supervisor 以独立子进程执行每轮任务（单轮超时强杀、异常计数）；外部计划任务每 5 分钟巡检心跳，对失联、僵尸进程、旧版本自动清理并拉起，含每小时重启上限。
+- **双层看门狗**：内部 supervisor 以独立子进程执行每轮任务（单轮超时强杀、异常计数）；外部计划任务每 2 分钟巡检心跳，对失联、僵尸进程、旧版本自动清理并拉起，含每小时重启上限。
 - **访问健康巡检**：supervisor 空闲时轻量探测 `github.com`，连续失败达阈值即触发一轮完整 IP 重探测，补上「成功轮次之间 IP 失效」的发现空窗。
-- **无人值守运行**：随机抖动间隔刷新（45–120 分钟）、失败后缩短至 10 分钟、登录自启（最高权限、取消 72 小时上限、支持电池与补跑）、单实例互斥、日志轮转与状态记录。
+- **无人值守运行**：随机抖动间隔刷新（默认 10–25 分钟，模板 20–60 分钟）、失败后缩短至 10 分钟、登录自启（最高权限、取消 72 小时上限、支持电池与补跑）、单实例互斥、日志轮转与状态记录。
 - **命令行接口**：11 个命令（含手动入口 `--open`），退出码 0–5 区分成功、无可用记录、权限不足、写入失败、验证失败与配置错误。详见程序 `--help`。
+
+### 工作原理与运行示例
+
+```text
+双击 run-as-admin.bat
+   |  UAC 批准一次
+   v
+计划任务（最高权限 / 登录自启）
+   |
+   +-- supervisor（常驻）
+   |     +-- 热路径线程：每 500 ms 检查当前 github.com IP
+   |     |      失效 -> 实时验证备用 IP -> 单行改 hosts + 刷新 DNS（约 20 ms）
+   |     +-- worker：每 10-25 min 全量探测 9 个域名（TLS 校验 + 整页 500 KB）
+   |
+   +-- watchdog 任务：每 2 min 查心跳 -> 失联则清理并拉起
+```
+
+实测输出节选（2026-11-09；程序状态行为中文，`...` 表示省略）：
+
+```text
+$ py -3 github_hosts_keeper.py --status
+===== GitHub Hosts Keeper 状态 =====
+  result                 : success
+  message                : 更新成功: 9 条记录, 页面可访问
+  verified_count         : 9
+  supervisor 健康          : 是 (心跳 7s, PID 7684 存活)
+  访问巡检                 : ok=True 连续失败=0 (连通 HTTP 200)
+  ...
+========================================
+
+github_hosts_keeper.log
+2026-11-09 21:21:26,495 [INFO] 热路径切换 20.27.177.113 -> 20.205.243.166 耗时 21.2ms (DNS 0.12ms, 实时验证 1 个候选, 原因: 连接超时)
+```
 
 ### 目录结构
 
 | 文件 | 说明 |
 |---|---|
-| `github_hosts_keeper.py` | 主程序（单文件，约 1200 行，仅 Python 标准库） |
+| `github_hosts_keeper.py` | 主程序（单文件，约 1700 行，仅 Python 标准库） |
 | `config.json` | 随附的默认配置，可直接使用或按需修改 |
 | `config.example.json` | 与默认配置一致的对照模板，用于改坏后恢复默认值 |
 | `run-as-admin.bat` | 一键启动器：申请 UAC → 注册两个计划任务 → 交由无窗口守护进程接管 |
@@ -43,6 +87,7 @@
 | `docs/CONFIGURATION.md` | 配置要求：全部配置项、默认值与调优建议 |
 | `LICENSE` | MIT 许可证 |
 | `.gitignore` | 排除运行时产物与本机数据 |
+| `CONTRIBUTING.md` | 反馈问题所需信息、提交改动前的自检清单与边界 |
 
 运行时产物 `state.json`、`heartbeat.json`、`ip_pool.json`、`github_hosts_keeper.log`、`backups/` 由程序自动生成，不纳入版本控制。
 
@@ -82,7 +127,7 @@
 
 ### 代码结构导览
 
-主程序是单文件、仅使用 Python 标准库。按现有函数分为四组，方便定位与审阅：
+主程序是单文件、仅使用 Python 标准库。按现有函数分为五组，方便定位与审阅：
 
 | 分组 | 代表函数 |
 |---|---|
@@ -90,6 +135,7 @@
 | `hosts` 事务与安全 | `decode_hosts`、`rebuild_hosts`、`backup_hosts`、`write_hosts_bytes`、`rollback`、`apply_hosts`、`flush_dns` |
 | 自愈与状态 | `run_cycle`、`verify`、`access_check`、`run_watchdog`、`run_daemon`、`write_heartbeat`、`pid_alive` |
 | 命令行与安装 | `install_task`、`uninstall_task`、`show_status`、`do_rollback`、`open_github_page`、`main` |
+| 热路径与故障切换 | `micro_probe`、`refresh_pool`、`verify_and_switch`、`switch_domain_ip`、`hotpath_loop`、`_discover_one` |
 
 自检入口（均无需额外依赖）：`--help` 列出全部命令；`--dry-run` 只探测不写文件；`--status` 只读查看状态；`--rollback` 还原最近一次 `hosts` 备份。
 
@@ -122,6 +168,18 @@ py -3 github_hosts_keeper.py --status
 
 `--dry-run` 只探测、不写任何文件，可用于安装前自检；`--status` 中「supervisor 健康: 是」且 `result: success` 表示当前可用；`--rollback` 可还原最近一次 `hosts` 备份。全部命令见 `py -3 github_hosts_keeper.py --help`。
 
+提交问题或改动前，用程序自带命令自检即可，无需安装测试框架或第三方依赖：
+
+| 命令 | 通过标准 |
+|---|---|
+| `py -3 github_hosts_keeper.py --help` | 11 个命令全部列出，无异常 |
+| `py -3 github_hosts_keeper.py --dry-run` | 只探测、不写 `hosts`，退出码 0 |
+| `py -3 github_hosts_keeper.py --status` | `result: success`、`supervisor 健康: 是` |
+| `py -3 -m py_compile github_hosts_keeper.py` | 无语法错误 |
+| `py -3 github_hosts_keeper.py --rollback` | 需要时能还原最近一次 `hosts` 备份 |
+
+改了配置需确认 `config.json` 与 `config.example.json` 键集合一致；改了说明需同步本文件的中文与 English 两部分。
+
 ### 常见问题 / Troubleshooting
 
 | 现象 | 怎么处理 |
@@ -135,7 +193,7 @@ py -3 github_hosts_keeper.py --status
 | 想还原被改动的 `hosts` | 执行 `py -3 github_hosts_keeper.py --rollback`。 |
 | `hosts` 改了但浏览器仍打不开 | 先看下面「注意事项」的能力边界与网络配置：浏览器 DoH、系统代理、IPv6 优先都会绕过 `hosts`。 |
 
-遇到问题请开 Issue，并附上 `--status` 输出与 `github_hosts_keeper.log` 中的相关片段。
+遇到问题请开 Issue，并附上 `--status` 输出与 `github_hosts_keeper.log` 中的相关片段；提交改动前请按 [`CONTRIBUTING.md`](CONTRIBUTING.md) 自检。
 
 ### 注意事项
 
@@ -159,22 +217,66 @@ Editing `hosts` once only works for a few days — GitHub becomes unreachable ag
 
 > Scope: this tool solves access problems at the **DNS resolution** layer. If a network applies TLS/SNI-level interference to every GitHub IP, editing `hosts` cannot restore web access; the program reports this explicitly instead of pretending to succeed. See "Notes".
 
+### Current Version & Download
+
+| Item | Value |
+|---|---|
+| Latest | `v1.0.2` — hot-path failover and connection stability iteration (2026-11-09) |
+| Download | [Releases Latest](https://github.com/Reivun2lrr/github-hosts-watchdog-no-vpn-needed-/releases/latest) -> `github-hosts-watchdog-v1.0.2.zip`, 11 files, extract and run |
+| Previous | `v1.0.1` is kept as the rollback version; `v1.0.0` is the initial release |
+| Source | `main` branch, MIT licensed, Python 3 standard library only, no third-party packages |
+
+> Always use the Latest link: the `v1.0.1` asset predates the hot path, the two asset-CDN domains, and the one-click connect tool.
+
 ### Key Features
 
 - **Trusted IP discovery**: 3 DoH endpoints (Alibaba / Cloudflare / Tencent) plus a built-in candidate pool; up to 14 candidates per domain, 12 concurrent probes. Each candidate must pass a TCP 443 connection, TLS certificate validation (SNI), and an HTTPS request; private/reserved addresses are rejected to prevent `hosts` poisoning.
 - **Safe write transaction**: only the GitHub entries inside a managed marker block are replaced; duplicate and stale entries are cleaned while every other line of `hosts` is preserved verbatim. Backup before writing (10 retained), byte verification after writing, byte-level rollback on failure, with original encoding, line endings, and ACL preserved. If valid records fall below the threshold, `hosts` is left untouched with an explicit notice.
 - **Activation and verification**: flush the DNS cache → confirm the system resolution → verify over HTTPS. No browser is launched and no page is displayed at any point.
 - **Manual entry**: double-click `open-github.bat`, or run `py -3 github_hosts_keeper.py --open`, to open `https://github.com` in your default browser. No background task, autostart, or watchdog ever calls it — you control exactly when the page appears.
-- **Two-layer watchdog**: an internal supervisor runs each cycle in a separate child process (hard timeout kill, failure counting); an external scheduled task checks the heartbeat every 5 minutes and cleans up / restarts lost, zombie, or legacy instances, with an hourly restart cap.
+- **Two-layer watchdog**: an internal supervisor runs each cycle in a separate child process (hard timeout kill, failure counting); an external scheduled task checks the heartbeat every 2 minutes and cleans up / restarts lost, zombie, or legacy instances, with an hourly restart cap.
 - **Access-health checks**: while the supervisor is idle it performs a lightweight `github.com` probe; consecutive failures trigger a full IP rediscovery cycle, closing the detection gap when an IP expires between successful cycles.
-- **Unattended operation**: randomized jittered refresh (45–120 minutes), shortened to 10 minutes after failure, logon auto-start (highest privileges, no 72-hour limit, battery- and catch-up-friendly), single-instance mutex, log rotation, and state recording.
+- **Unattended operation**: randomized jittered refresh (10–25 minutes by default; 20–60 in the template), shortened to 10 minutes after failure, logon auto-start (highest privileges, no 72-hour limit, battery- and catch-up-friendly), single-instance mutex, log rotation, and state recording.
 - **CLI**: 11 commands (including the manual `--open` entry); exit codes 0–5 distinguish success, no usable record, insufficient privileges, write failure, verification failure, and configuration error. See the program's `--help`.
+
+### How It Works & A Real Run
+
+```text
+double-click run-as-admin.bat
+   |  one UAC approval
+   v
+scheduled tasks (highest privileges / logon autostart)
+   |
+   +-- supervisor (resident)
+   |     +-- hot path: checks the current github.com IP every 500 ms
+   |     |      failure -> live-verify a standby IP -> single-line hosts rewrite + DNS flush (~20 ms)
+   |     +-- worker: full probe of 9 domains every 10-25 min (TLS check + 500 KB full page)
+   |
+   +-- watchdog task: heartbeat every 2 min -> clean up and restart if lost
+```
+
+Excerpt from a real run on 2026-11-09 (the program prints status in Chinese; `...` marks omitted lines):
+
+```text
+$ py -3 github_hosts_keeper.py --status
+===== GitHub Hosts Keeper 状态 =====
+  result                 : success
+  message                : 更新成功: 9 条记录, 页面可访问
+  verified_count         : 9
+  supervisor 健康          : 是 (心跳 7s, PID 7684 存活)
+  访问巡检                 : ok=True 连续失败=0 (连通 HTTP 200)
+  ...
+========================================
+
+github_hosts_keeper.log
+2026-11-09 21:21:26,495 [INFO] 热路径切换 20.27.177.113 -> 20.205.243.166 耗时 21.2ms (DNS 0.12ms, 实时验证 1 个候选, 原因: 连接超时)
+```
 
 ### Project Structure
 
 | File | Description |
 |---|---|
-| `github_hosts_keeper.py` | Main program (single file, ~1200 lines, standard library only) |
+| `github_hosts_keeper.py` | Main program (single file, ~1700 lines, standard library only) |
 | `config.json` | Shipped default configuration, usable as-is or editable |
 | `config.example.json` | Reference template identical to the defaults, for restoring them |
 | `run-as-admin.bat` | One-click launcher: UAC → register both scheduled tasks → hand over to the windowless daemon |
@@ -185,6 +287,7 @@ Editing `hosts` once only works for a few days — GitHub becomes unreachable ag
 | `docs/CONFIGURATION.md` | Configuration reference: every key, default, and tuning advice |
 | `LICENSE` | MIT License |
 | `.gitignore` | Excludes runtime artifacts and local data |
+| `CONTRIBUTING.md` | Issue reporting checklist, pre-submission self-checks, and contribution boundaries |
 
 Runtime artifacts `state.json`, `heartbeat.json`, `ip_pool.json`, `github_hosts_keeper.log`, and `backups/` are generated automatically and are not version-controlled.
 
@@ -224,7 +327,7 @@ Runtime artifacts `state.json`, `heartbeat.json`, `ip_pool.json`, `github_hosts_
 
 ### Code Map
 
-The main program is a single file using only the Python standard library. Its existing functions fall into four groups, useful for locating code and reviewing changes:
+The main program is a single file using only the Python standard library. Its existing functions fall into five groups, useful for locating code and reviewing changes:
 
 | Group | Representative functions |
 |---|---|
@@ -232,6 +335,7 @@ The main program is a single file using only the Python standard library. Its ex
 | `hosts` transaction and safety | `decode_hosts`, `rebuild_hosts`, `backup_hosts`, `write_hosts_bytes`, `rollback`, `apply_hosts`, `flush_dns` |
 | Self-healing and state | `run_cycle`, `verify`, `access_check`, `run_watchdog`, `run_daemon`, `write_heartbeat`, `pid_alive` |
 | CLI and installation | `install_task`, `uninstall_task`, `show_status`, `do_rollback`, `open_github_page`, `main` |
+| Hot path and failover | `micro_probe`, `refresh_pool`, `verify_and_switch`, `switch_domain_ip`, `hotpath_loop`, `_discover_one` |
 
 Self-check entry points (no extra dependencies): `--help` lists every command; `--dry-run` probes without writing; `--status` is read-only; `--rollback` restores the most recent `hosts` backup.
 
@@ -264,6 +368,18 @@ py -3 github_hosts_keeper.py --status
 
 `--dry-run` only probes and writes nothing, useful for a pre-install check; in `--status`, "supervisor 健康: 是" (supervisor healthy: yes) together with `result: success` means it is currently working; `--rollback` restores the most recent `hosts` backup. Every command is listed by `py -3 github_hosts_keeper.py --help`.
 
+Before reporting an issue or submitting a change, run the built-in self-checks; no test framework or third-party packages are needed:
+
+| Command | Pass criterion |
+|---|---|
+| `py -3 github_hosts_keeper.py --help` | all 11 commands listed, no errors |
+| `py -3 github_hosts_keeper.py --dry-run` | probes only, `hosts` untouched, exit code 0 |
+| `py -3 github_hosts_keeper.py --status` | `result: success`, supervisor healthy |
+| `py -3 -m py_compile github_hosts_keeper.py` | no syntax errors |
+| `py -3 github_hosts_keeper.py --rollback` | restores the latest `hosts` backup when needed |
+
+After editing configuration, keep the `config.json` and `config.example.json` key sets identical; after editing docs, keep both language sections in sync.
+
 ### Troubleshooting
 
 | Symptom | What to do |
@@ -277,7 +393,7 @@ py -3 github_hosts_keeper.py --status
 | Want to undo the `hosts` change | Run `py -3 github_hosts_keeper.py --rollback`. |
 | `hosts` changed but the browser still fails | See "Notes" below: browser DoH, system proxies, and IPv6 preference can all bypass `hosts`. |
 
-Please open an Issue with your `--status` output and the relevant lines from `github_hosts_keeper.log`.
+Please open an Issue with your `--status` output and the relevant lines from `github_hosts_keeper.log`; before submitting a change, follow the self-checks in [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 ### Notes
 
