@@ -71,7 +71,7 @@
     "hotpath_connect_timeout_ms": 400,
     "hotpath_backoff_ms": 2000,
     "hotpath_fail_threshold": 1,
-    "hotpath_switch_cooldown_ms": 1500,
+    "hotpath_switch_cooldown_ms": 5000,
     "hotpath_pool_refresh_ms": 3000,
     "hotpath_pool_size": 8,
     "hotpath_pool_path": "ip_pool.json"

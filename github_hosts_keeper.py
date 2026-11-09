@@ -155,7 +155,7 @@ DEFAULTS = {
     "hotpath_connect_timeout_ms": 400,
     "hotpath_backoff_ms": 2000,
     "hotpath_fail_threshold": 1,
-    "hotpath_switch_cooldown_ms": 1500,
+    "hotpath_switch_cooldown_ms": 5000,
     "hotpath_pool_refresh_ms": 3000,
     "hotpath_pool_size": 8,
     "hotpath_pool_path": "ip_pool.json",
@@ -785,11 +785,28 @@ def current_host_ip(domain: str = "github.com") -> str | None:
 
 
 def best_pool_ip(cfg, pool: dict, exclude: str | None) -> str | None:
-    """选延迟最低的备用 IP; 允许近期有少量失败, 避免间歇阻断时池被判空。"""
-    ranked = sorted(
-        ((e.get("fail", 0), e.get("rtt_ms"), ip) for ip, e in pool["entries"].items()
-         if e.get("rtt_ms") is not None and e.get("fail", 0) <= 2 and ip != exclude),
-        key=lambda x: (x[0], x[1]))
+    """选延迟最低的备用 IP。
+
+    近期成功过即保留候选资格(间歇阻断时池不能一轮失败就判空); 排除当前 IP 与
+    10 秒内刚切离的 IP, 配合切换冷却抑制在两个 IP 之间来回抖动。
+    """
+    ts = time.time()
+    recent = pool.get("last_switch") or {}
+    recent_from = (recent.get("from")
+                   if ts - float(recent.get("epoch", 0)) < 10 else None)
+    ranked = []
+    for ip, e in pool["entries"].items():
+        rtt, last_ok = e.get("rtt_ms"), e.get("last_ok")
+        if rtt is None or not last_ok or ip == exclude or ip == recent_from:
+            continue
+        try:
+            age = ts - datetime.strptime(last_ok, "%Y-%m-%d %H:%M:%S").timestamp()
+        except Exception:                             # noqa: BLE001
+            continue
+        if age > 300:                                 # 5 分钟内成功过才算可用
+            continue
+        ranked.append((e.get("fail", 0), rtt, ip))
+    ranked.sort(key=lambda x: (x[0], x[1]))
     return ranked[0][2] if ranked else None
 
 
@@ -916,7 +933,8 @@ def hotpath_loop(cfg, stop_event: threading.Event, domain: str = "github.com"):
                             failures = 0
                             pool["active_ip"] = pick
                             pool["switches"] = int(pool.get("switches", 0)) + 1
-                            pool["last_switch"] = {"at": now(), "from": old, "to": pick,
+                            pool["last_switch"] = {"at": now(), "epoch": time.time(),
+                                                   "from": old, "to": pick,
                                                    "reason": r.get("reason"), **sw}
                             save_ip_pool(cfg, pool)
                             log.info("热路径切换 %s -> %s 耗时 %.1fms (DNS %.2fms, 原因: %s)",
@@ -1557,7 +1575,7 @@ def show_status(cfg):
     hp = load_ip_pool(cfg)
     print(f"  {'热路径':22s}: {'启用' if cfg.get('hotpath_enabled', True) else '禁用'} "
           f"切换={hp.get('switches', 0)} 当前={hp.get('active_ip') or current_host_ip() or '-'} "
-          f"可用池={sum(1 for e in hp['entries'].values() if e.get('rtt_ms') is not None and e.get('fail', 0) <= 2)}/{len(hp['entries'])}")
+          f"有测速记录={sum(1 for e in hp['entries'].values() if e.get('rtt_ms') is not None)}/{len(hp['entries'])}")
     print(f"  {'任务 / 看门狗任务':22s}: {cfg['task_name']} / {wd_name(cfg) if cfg['watchdog_enabled'] else '禁用'}")
     if st.get("verified_records"):
         print("  当前生效记录:")
